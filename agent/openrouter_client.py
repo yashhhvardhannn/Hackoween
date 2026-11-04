@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import time
 
 import requests
@@ -31,6 +32,11 @@ API_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-v4.1-flash")
 MAX_ATTEMPTS = 3
 THINKING = os.getenv("OPENROUTER_THINKING", "1") != "0"
+# Room reserved for the reply. Thinking needs a lot (too little gives empty replies);
+# without thinking a reply is ~200 tokens. OpenRouter refuses requests whose reservation
+# the account's remaining credit can't cover, so this is lowered automatically when needed.
+MAX_TOKENS = int(os.getenv("OPENROUTER_MAX_TOKENS", "6000" if THINKING else "1000"))
+MIN_TOKENS = 400
 
 # Same tools as the Claude client, in OpenAI/OpenRouter "function" format.
 OPENAI_TOOLS = [
@@ -60,6 +66,8 @@ class OpenRouterRobotClient:
             raise RuntimeError("OPENROUTER_API_KEY is not set in .env")
         self.history = []
         self.pending_tool_id = None
+        self.max_tokens = MAX_TOKENS
+        self.thinking = THINKING
 
     def decide(self, command, image_bytes, depth=None):
         if self.pending_tool_id is not None:
@@ -101,11 +109,10 @@ class OpenRouterRobotClient:
 
         body = {
             "model": MODEL,
-            # Room for models that "think" before answering; too small a limit gives empty replies.
-            "max_tokens": 6000,
+            "max_tokens": self.max_tokens,
             # Hidden "thinking": on by default (5-25 s per step, much better driving).
             # OPENROUTER_THINKING=0 in .env makes steps ~1.5 s, but the model gets lost more often.
-            "reasoning": {"effort": "low"} if THINKING else {"enabled": False},
+            "reasoning": {"effort": "low"} if self.thinking else {"enabled": False},
             "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + self.history,
             "tools": OPENAI_TOOLS,
             "tool_choice": "required",
@@ -123,6 +130,22 @@ class OpenRouterRobotClient:
             )
             if response.status_code != 200:
                 last_problem = f"OpenRouter error {response.status_code}: {response.text[:300]}"
+                if response.status_code == 402:
+                    # Low credit: "You requested up to 6000 tokens, but can only afford 2005".
+                    afford = re.search(r"can only afford (\d+)", response.text)
+                    if afford and int(afford.group(1)) - 100 >= MIN_TOKENS and attempt < MAX_ATTEMPTS:
+                        self.max_tokens = int(afford.group(1)) - 100
+                        body["max_tokens"] = self.max_tokens
+                        print(f"  (low OpenRouter credit: reply limit lowered to {self.max_tokens} tokens)")
+                        if self.thinking and self.max_tokens < 3000:
+                            # Thinking needs more room than that (it would end in empty replies).
+                            self.thinking = False
+                            body["reasoning"] = {"enabled": False}
+                            print("  (thinking switched off for this run to fit the remaining credit)")
+                        continue
+                    last_problem = ("OpenRouter account is out of credit (error 402). Add credit at "
+                                    "openrouter.ai/settings/credits, or set OPENROUTER_THINKING=0 in .env "
+                                    "(much smaller requests). Details: " + response.text[:200])
                 if response.status_code in (429, 500, 502, 503) and attempt < MAX_ATTEMPTS:
                     print(f"  ({last_problem[:80]}... retrying {attempt}/{MAX_ATTEMPTS - 1})")
                     time.sleep(2 * attempt)
