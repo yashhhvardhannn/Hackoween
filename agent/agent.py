@@ -83,6 +83,11 @@ def run_agent(command, mode, reset=False):
         elif mode == "mock":
             from agent.mock_claude import MockClaudeClient
             claude = MockClaudeClient()
+        elif mode == "openrouter":
+            # Any OpenRouter model with image + tool support; development only, not judged runs.
+            from agent.openrouter_client import OpenRouterRobotClient, MODEL as OR_MODEL
+            claude = OpenRouterRobotClient()
+            print("OpenRouter model:", OR_MODEL)
         elif mode == "vision":
             # No-API stand-in that reads the camera pixels; for testing only, not judged runs.
             from agent.vision_brain import VisionBrain
@@ -98,14 +103,15 @@ def run_agent(command, mode, reset=False):
                     break
             else:
                 decision = claude.decide(command, image, depth)
-                model_type = "haiku" if "haiku" in MODEL.lower() else "sonnet"
-                step_cost = budget.estimate_cost(
-                    model_type,
-                    decision["input_tokens"],
-                    decision["output_tokens"],
-                )
-                run_cost += step_cost
-                print(f"Estimated API cost: ${step_cost:.6f}")
+                if mode == "claude":
+                    model_type = "haiku" if "haiku" in MODEL.lower() else "sonnet"
+                    step_cost = budget.estimate_cost(
+                        model_type,
+                        decision["input_tokens"],
+                        decision["output_tokens"],
+                    )
+                    run_cost += step_cost
+                    print(f"Estimated API cost: ${step_cost:.6f}")
 
             action = decision["name"]
             arguments = decision["arguments"]
@@ -114,7 +120,7 @@ def run_agent(command, mode, reset=False):
             print("Arguments:", arguments)
 
             if action == "give_up":
-                if mode in ("mock", "claude", "vision"):
+                if mode in ("mock", "claude", "vision", "openrouter"):
                     claude.record_result({
                         "gave_up": True,
                         "reason": arguments.get("reason", ""),
@@ -150,7 +156,7 @@ def run_agent(command, mode, reset=False):
             if collision_count >= 3:
                 print("WARNING: Three consecutive collisions. Robot may be stuck.")
 
-            if mode in ("mock", "claude", "vision"):
+            if mode in ("mock", "claude", "vision", "openrouter"):
                 claude.record_result(result)
 
             logger.save_step(
@@ -196,7 +202,7 @@ def main():
 
     parser.add_argument(
         "--mode",
-        choices=["dummy", "mock", "claude", "vision"],
+        choices=["dummy", "mock", "claude", "vision", "openrouter"],
         default="dummy"
     )
 
