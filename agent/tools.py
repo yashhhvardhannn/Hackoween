@@ -1,29 +1,33 @@
 
+import os
+import time
+
 import requests
 
-BASE_URL = "http://localhost:8080"
+BASE_URL = os.getenv("ENGINE_URL", "http://localhost:8080")
+_RETRY_DELAY_SECONDS = 0.25
+
+
+def _request(method, path, **kwargs):
+    """Make one engine request, retrying a connection failure once."""
+    try:
+        return requests.request(method, BASE_URL + path, **kwargs)
+    except requests.ConnectionError:
+        time.sleep(_RETRY_DELAY_SECONDS)
+        return requests.request(method, BASE_URL + path, **kwargs)
 
 def get_state():
-    response = requests.get(
-        f"{BASE_URL}/state",
-        timeout=10
-    )
+    response = _request("GET", "/state", timeout=10)
     response.raise_for_status()
     return response.json()
 
 def get_image():
-    response = requests.get(
-        f"{BASE_URL}/look",
-        timeout=10
-    )
+    response = _request("GET", "/look", timeout=10)
     response.raise_for_status()
     return response.content
 
 def get_depth():
-    response = requests.get(
-        f"{BASE_URL}/depth",
-        timeout=10
-    )
+    response = _request("GET", "/depth", timeout=10)
     response.raise_for_status()
     return response.json()
 
@@ -51,10 +55,27 @@ def execute_action(name, args=None):
     elif name == "turn":
         payload["degrees"] = args["degrees"]
 
-    response = requests.post(
-        BASE_URL + endpoints[name],
-        json=payload,
-        timeout=60
+    response = _request(
+        "POST", endpoints[name], json=payload, timeout=60
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def start_run(command, run_id):
+    response = _request(
+        "POST",
+        "/run/start",
+        json={"command": command, "run_id": run_id},
+        timeout=10,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def end_run(outcome):
+    response = _request(
+        "POST", "/run/end", json={"outcome": outcome}, timeout=10
     )
     response.raise_for_status()
     return response.json()

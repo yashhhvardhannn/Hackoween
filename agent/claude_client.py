@@ -9,7 +9,7 @@ from agent.prompts import SYSTEM_PROMPT
 
 MODEL = os.getenv(
     "CLAUDE_MODEL",
-    "claude-sonnet-4-5"
+    "claude-sonnet-5-5"
 )
 
 
@@ -120,6 +120,24 @@ class ClaudeRobotClient:
                 }
             }
         ]
+
+        # Keep prior turns as compact text. Only the current camera frame is
+        # sent as an image, preventing image-token costs from multiplying.
+        for message in self.history:
+            if message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if isinstance(content, list) and any(
+                block.get("type") == "image"
+                for block in content
+                if isinstance(block, dict)
+            ):
+                message["content"] = [
+                    {
+                        "type": "text",
+                        "text": "Earlier camera frame: reviewed; use the latest frame.",
+                    }
+                ]
 
         self.history.append({
             "role": "user",

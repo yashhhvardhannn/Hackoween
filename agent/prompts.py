@@ -53,7 +53,7 @@ Identify objects by visible characteristics:
 
 For commands involving comparisons such as:
 - tallest object
-- round red object
+- round object
 - object farthest from the drop zone
 
 Perform a full scan before selecting a target.
