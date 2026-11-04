@@ -22,6 +22,7 @@ from agent.tools import (
     reset_scene,
 )
 from agent.logger import RunLogger
+from agent.path_overlay import add_path_guide
 
 
 MAX_STEPS = 60
@@ -96,6 +97,9 @@ def run_agent(command, mode, reset=False):
         for step in range(MAX_STEPS):
             image = get_image()
             depth = get_depth()
+            if mode in ("claude", "openrouter"):
+                # Show the model how wide the robot's path is (camera geometry only, no object data).
+                image = add_path_guide(image)
 
             if mode == "dummy":
                 decision = dummy_decision(step)

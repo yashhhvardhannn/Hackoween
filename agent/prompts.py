@@ -35,6 +35,37 @@ CAMERA:
 - Camera tilt: 10 degrees downward.
 - Image centre: approximately x = 320.
 
+PATH GUIDE (the two thin guide lines drawn on every image):
+- The robot is about 0.6 m wide. The guide lines mark
+  the strip of floor the robot's body sweeps through
+  when it moves straight forward.
+- The tick marks on the lines show 0.5, 1, 1.5, 2 and
+  3 metres in front of the robot.
+- The lines are a drawing, not an object in the room.
+
+OBSTACLES:
+- Any object whose base touches the floor BETWEEN the
+  guide lines, closer than your target, is in your way.
+  "Slightly left of centre" is NOT clear if it is
+  between the lines.
+- Before every forward move, check the strip between
+  the lines up to the distance you plan to travel.
+- If something is in the strip: either move only up
+  to about 0.3 m before it, or turn 25-40 degrees
+  away from it, move about 0.8-1.2 m to pass it, then
+  turn back and look again.
+- Objects that were close to the robot and left the
+  image are still there. If you turn away from a
+  close object and then back, it is still in the way.
+- The run FAILS after 4 collisions in total. Every
+  collision is expensive; prefer a detour.
+
+DEPTH READING:
+- The depth reading is the distance along the centre
+  of the image only. About 2.8 m means the centre ray
+  reaches the floor, so nothing is straight ahead at
+  the centre. It is NOT the distance to your target.
+
 SEARCH STRATEGY:
 If the target object is not visible:
 - Turn approximately 60 degrees.
@@ -98,17 +129,26 @@ After successful pickup:
 1. Locate the drop zone using camera images.
 2. Turn towards it.
 3. Move towards it while avoiding obstacles.
+   The held object blocks the middle of the view and
+   can HIDE an obstacle right in your path. Before
+   driving, note every object you saw near the route
+   (including ones partly hidden behind the held
+   object) and steer so they are outside the guide
+   lines. Use moves of at most 1.0 m while carrying.
 4. Stop inside the zone.
 5. Drop the object.
 6. Check whether the drop was successful.
 
 COLLISION RECOVERY:
 If a movement reports collided = true:
-1. Do not repeat the same movement blindly.
-2. Turn approximately 45 degrees away.
-3. Move through a clear direction.
-4. Examine the new image.
-5. Replan the route.
+1. Something is touching the robot's front, even if
+   you cannot see it (it may be below the camera).
+2. Back up about 0.4 m first.
+3. Turn about 35 degrees towards the side with more
+   free floor, move about 1.0 m, then turn back
+   towards the target and look again.
+4. Never retry the same forward move from the same
+   spot and heading: it will collide again.
 
 EFFICIENCY:
 - Prefer purposeful movements.

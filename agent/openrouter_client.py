@@ -85,7 +85,9 @@ class OpenRouterRobotClient:
         body = {
             "model": MODEL,
             # Room for models that "think" before answering; too small a limit gives empty replies.
-            "max_tokens": 2000,
+            "max_tokens": 6000,
+            # Keep the hidden "thinking" short: one action per step does not need long reasoning.
+            "reasoning": {"effort": "low"},
             "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + self.history,
             "tools": OPENAI_TOOLS,
             "tool_choice": "required",
