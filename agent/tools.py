@@ -73,6 +73,13 @@ def start_run(command, run_id):
     return response.json()
 
 
+def reset_scene():
+    """Put the robot and all objects back at their start positions (development runs)."""
+    response = _request("POST", "/reset", json={}, timeout=10)
+    response.raise_for_status()
+    return response.json()
+
+
 def end_run(outcome):
     response = _request(
         "POST", "/run/end", json={"outcome": outcome}, timeout=10

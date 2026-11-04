@@ -19,6 +19,7 @@ from agent.tools import (
     get_depth,
     start_run,
     end_run,
+    reset_scene,
 )
 from agent.logger import RunLogger
 
@@ -47,7 +48,7 @@ def dummy_decision(step):
     }
 
 
-def run_agent(command, mode):
+def run_agent(command, mode, reset=False):
     run_id = datetime.now().strftime(
         "%Y%m%d_%H%M%S"
     )
@@ -61,6 +62,10 @@ def run_agent(command, mode):
     print("Mode:", mode)
     print("Command:", command)
     print("Run ID:", run_id)
+
+    if reset:
+        reset_scene()
+        print("Scene reset to start positions")
 
     start_run(command, run_id)
     outcome = "fail_not_reached"
@@ -78,6 +83,10 @@ def run_agent(command, mode):
         elif mode == "mock":
             from agent.mock_claude import MockClaudeClient
             claude = MockClaudeClient()
+        elif mode == "vision":
+            # No-API stand-in that reads the camera pixels; for testing only, not judged runs.
+            from agent.vision_brain import VisionBrain
+            claude = VisionBrain()
 
         for step in range(MAX_STEPS):
             image = get_image()
@@ -105,7 +114,7 @@ def run_agent(command, mode):
             print("Arguments:", arguments)
 
             if action == "give_up":
-                if mode in ("mock", "claude"):
+                if mode in ("mock", "claude", "vision"):
                     claude.record_result({
                         "gave_up": True,
                         "reason": arguments.get("reason", ""),
@@ -141,7 +150,7 @@ def run_agent(command, mode):
             if collision_count >= 3:
                 print("WARNING: Three consecutive collisions. Robot may be stuck.")
 
-            if mode in ("mock", "claude"):
+            if mode in ("mock", "claude", "vision"):
                 claude.record_result(result)
 
             logger.save_step(
@@ -187,13 +196,19 @@ def main():
 
     parser.add_argument(
         "--mode",
-        choices=["dummy", "mock", "claude"],
+        choices=["dummy", "mock", "claude", "vision"],
         default="dummy"
+    )
+
+    parser.add_argument(
+        "--reset",
+        action="store_true",
+        help="put the robot and objects back at their start positions first",
     )
 
     args = parser.parse_args()
 
-    run_agent(args.command, args.mode)
+    run_agent(args.command, args.mode, reset=args.reset)
 
 
 if __name__ == "__main__":

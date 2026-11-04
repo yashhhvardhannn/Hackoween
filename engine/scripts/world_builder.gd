@@ -241,7 +241,9 @@ func _build_robot() -> void:
 
 	pickup_point = Marker3D.new()
 	pickup_point.name = "PickupPoint"
-	pickup_point.position = Vector3(0.62, 0.25, 0)
+	# Carried objects rest just above the floor, ahead of the camera (forklift style), so even
+	# the tall cylinder blocks as little of the robot's view as possible.
+	pickup_point.position = Vector3(0.9, 0.01, 0)
 	robot.add_child(pickup_point)
 
 	pickup_area = Area3D.new()
@@ -498,7 +500,11 @@ func _pickup() -> Dictionary:
 	held.linear_velocity = Vector3.ZERO
 	held.angular_velocity = Vector3.ZERO
 	held.reparent(robot, true)
-	held.global_position = pickup_point.global_position
+	var half_height := 0.15
+	for child in held.get_children():
+		if child is MeshInstance3D:
+			half_height = child.get_aabb().size.y / 2.0
+	held.global_position = pickup_point.global_position + Vector3.UP * half_height
 	held.global_rotation = robot.global_rotation
 	held.collision_layer = 0
 	held.collision_mask = 0
