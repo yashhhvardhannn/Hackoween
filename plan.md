@@ -54,6 +54,7 @@ Base URL `http://localhost:8080`. Units: metres and degrees. Heading 0 = +x, pos
 | `POST /turn` | `{"degrees": f}` | `{"turned": f, "state": "..."}` |
 | `POST /pickup` | — | `{"success": bool}` (reach 0.5 m, ±30°) |
 | `POST /drop` | — | `{"success": bool, "in_zone": bool}` |
+| `POST /throw` | `{"distance": 0.5..4.0}` (m in front of the robot) | `{"success": bool, "in_zone": bool}` |
 | `POST /run/start` | `{"command": str, "run_id": str}` | `{"ok": true}`. Leaves Idle and starts POV frame capture into `runs/<run_id>/pov/`. **The command is stored only for the overlay and never echoed back.** |
 | `POST /run/end` | `{"outcome": str}` | `{"ok": true}`. Enters Done and stops capture. |
 | `POST /reset` | `{"layout": "default|L1|L2|..."}` | `{"ok": true}`. Respawns the scene (dev only, never during a judged run). |

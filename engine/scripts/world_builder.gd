@@ -5,7 +5,9 @@ extends Node3D
 const PORT := 8080
 const SPEED := 1.0
 const TURN_SPEED := 90.0
-const PICKUP_REACH := 0.5
+const PICKUP_REACH := 0.5      # brief: reach 0.5 m, measured from the robot's FRONT
+const ROBOT_RADIUS := 0.28     # matches the body capsule; the front is this far from the centre
+const CAMERA_FORWARD := 0.28   # brief: camera at the robot front, 0.5 m above the floor
 const PICKUP_HALF_ANGLE := 30.0
 const MAX_DEPTH := 10.0
 const BACK_OFF := 0.1          # brief: on collision, back off 0.1 m
@@ -13,6 +15,9 @@ const STUCK_SECONDS := 2.0     # brief: no movement for 2 s counts as blocked
 const MAX_RETRIES := 3         # brief: fail after 3 retries
 const POV_SIZE := Vector2i(1280, 720)  # Phase 2 clips: 720p
 const DROP_ZONE_CENTER := Vector3(-2.5, 0, 2.5)
+const THROW_MIN := 0.5         # /throw distance range in metres
+const THROW_MAX := 4.0
+const THROW_SETTLE_MAX := 4.0  # seconds to wait for a thrown object to stop
 const LOOK_SIZE := Vector2i(640, 480)
 const PANEL_SIZE := Vector2i(400, 260)
 
@@ -239,7 +244,9 @@ func _build_robot() -> void:
 
 	pickup_point = Marker3D.new()
 	pickup_point.name = "PickupPoint"
-	pickup_point.position = Vector3(0.48, 0.55, 0)
+	# Carried objects rest just above the floor, ahead of the camera (forklift style), so even
+	# the tall cylinder blocks as little of the robot's view as possible.
+	pickup_point.position = Vector3(0.9, 0.01, 0)
 	robot.add_child(pickup_point)
 
 	pickup_area = Area3D.new()
@@ -248,7 +255,7 @@ func _build_robot() -> void:
 	pickup_area.collision_layer = 0
 	pickup_area.collision_mask = 2
 	var ps := SphereShape3D.new()
-	ps.radius = PICKUP_REACH
+	ps.radius = PICKUP_REACH + 0.1  # covers everything up to ~0.85 m ahead of the centre
 	var pcs := CollisionShape3D.new()
 	pcs.shape = ps
 	pickup_area.add_child(pcs)
@@ -310,7 +317,7 @@ func _update_cameras() -> void:
 	if robot == null:
 		return
 	var fwd := _forward()
-	look_cam.global_position = robot.global_position + Vector3.UP * 0.5
+	look_cam.global_position = robot.global_position + fwd * CAMERA_FORWARD + Vector3.UP * 0.5
 	look_cam.look_at(look_cam.global_position + fwd + Vector3.DOWN * 0.18, Vector3.UP)
 	pov_cam.global_transform = look_cam.global_transform
 	# Close, downward-angled view of the pickup point. Keep the camera just
@@ -481,7 +488,7 @@ func _pickup() -> Dictionary:
 		var offset: Vector3 = body.global_position - robot.global_position
 		var flat := Vector3(offset.x, 0, offset.z)
 		var d := flat.length()
-		if d > PICKUP_REACH:
+		if d - ROBOT_RADIUS > PICKUP_REACH:  # gap from robot front to object centre
 			continue
 		if d > 0.001 and rad_to_deg(acos(clampf(fwd.dot(flat.normalized()), -1.0, 1.0))) > PICKUP_HALF_ANGLE:
 			continue
@@ -496,7 +503,11 @@ func _pickup() -> Dictionary:
 	held.linear_velocity = Vector3.ZERO
 	held.angular_velocity = Vector3.ZERO
 	held.reparent(robot, true)
-	held.global_position = pickup_point.global_position
+	var half_height := 0.15
+	for child in held.get_children():
+		if child is MeshInstance3D:
+			half_height = child.get_aabb().size.y / 2.0
+	held.global_position = pickup_point.global_position + Vector3.UP * half_height
 	held.global_rotation = robot.global_rotation
 	held.collision_layer = 0
 	held.collision_mask = 0
@@ -525,9 +536,13 @@ func _drop() -> Dictionary:
 		_end_run("pass")
 	return {"ok": true, "in_zone": inside}
 
-func _throw(power: float) -> Dictionary:
-	if held == null or not is_instance_valid(held):
-		return {"ok": false}
+func _throw(distance: float) -> Dictionary:
+	# Lob the held object forward so it lands about `distance` metres ahead of where it is held.
+	# 45-degree launch: range = v^2 / g, so v = sqrt(distance * g). It may bounce or roll a little.
+	if busy or held == null or not is_instance_valid(held):
+		return {"ok": false, "in_zone": false}
+	busy = true
+	distance = clampf(distance, THROW_MIN, THROW_MAX)
 	var obj := held
 	var transform_before := obj.global_transform
 	obj.reparent(self, true)
@@ -536,10 +551,38 @@ func _throw(power: float) -> Dictionary:
 	obj.sleeping = false
 	obj.collision_layer = 2
 	obj.collision_mask = 1 | 2
-	obj.apply_central_impulse(_forward() * power + Vector3.UP * power * 0.25)
 	held = null
-	state_name = "Done"
-	return {"ok": true}
+	# `distance` is measured from the robot's front (like the camera guide ticks); the object
+	# is held further ahead than that, so subtract the part it already covers.
+	var target := robot.global_position + _forward() * (ROBOT_RADIUS + distance)
+	var flight := maxf((target - obj.global_position).dot(_forward()), 0.2)
+	var g := float(ProjectSettings.get_setting("physics/3d/default_gravity", 9.8))
+	var v := sqrt(flight * g)
+	obj.linear_velocity = _forward() * v * cos(PI / 4.0) + Vector3.UP * v * sin(PI / 4.0)
+	obj.angular_velocity = Vector3.ZERO
+	# No air drag in flight (objects have linear_damp, which made throws land short);
+	# drag goes back on at landing so the object stops rolling soon.
+	var damp_before := obj.linear_damp
+	obj.linear_damp = 0.0
+	var flight_time := 2.0 * v * sin(PI / 4.0) / g
+	# Wait (in engine time) until it has landed and stopped, so the clip shows the flight.
+	var waited := 0.0
+	while waited < THROW_SETTLE_MAX:
+		await get_tree().physics_frame
+		waited += get_physics_process_delta_time()
+		_capture_frame()
+		if waited >= flight_time:
+			obj.linear_damp = damp_before
+		if waited > flight_time and obj.linear_velocity.length() < 0.05:
+			break
+	obj.linear_damp = damp_before
+	var delta := obj.global_position - DROP_ZONE_CENTER
+	var inside := absf(delta.x) <= 0.5 and absf(delta.z) <= 0.5
+	state_name = "Drop"
+	busy = false
+	if inside:
+		_end_run("pass")
+	return {"ok": true, "in_zone": inside}
 
 func _reset() -> void:
 	# Put everything back where it started, without reloading the scene
@@ -663,6 +706,16 @@ func _serve_peer() -> void:
 				_send_json(200, {"success": false, "in_zone": false})
 			else:
 				var r := await _drop()
+				_send_json(200, {"success": bool(r["ok"]), "in_zone": bool(r["in_zone"])})
+		"POST /throw":
+			if not body.has("distance"):
+				_send_json(400, {"error": "missing distance"})
+			elif state_name == "Done":
+				_send_json(200, {"success": false, "in_zone": false})
+			elif busy:
+				_send_json(409, {"error": "busy"})
+			else:
+				var r := await _throw(float(body["distance"]))
 				_send_json(200, {"success": bool(r["ok"]), "in_zone": bool(r["in_zone"])})
 		"POST /run/start":
 			# The command is only for the clip overlay (added later by tools/make_clip.py); never echoed.

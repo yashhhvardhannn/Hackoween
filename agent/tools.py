@@ -41,7 +41,8 @@ def execute_action(name, args=None):
         "move": "/move",
         "turn": "/turn",
         "pickup": "/pickup",
-        "drop": "/drop"
+        "drop": "/drop",
+        "throw": "/throw",
     }
 
     if name not in endpoints:
@@ -49,7 +50,7 @@ def execute_action(name, args=None):
 
     payload = {}
 
-    if name == "move":
+    if name in ("move", "throw"):
         payload["distance"] = args["distance"]
 
     elif name == "turn":
@@ -69,6 +70,13 @@ def start_run(command, run_id):
         json={"command": command, "run_id": run_id},
         timeout=10,
     )
+    response.raise_for_status()
+    return response.json()
+
+
+def reset_scene():
+    """Put the robot and all objects back at their start positions (development runs)."""
+    response = _request("POST", "/reset", json={}, timeout=10)
     response.raise_for_status()
     return response.json()
 
@@ -109,6 +117,18 @@ def validate_action(name, args):
         ):
             raise ValueError(
                 "Turn angle must be between -180 and 180 degrees"
+            )
+
+    elif name == "throw":
+        distance = args.get("distance")
+
+        if (
+            isinstance(distance, bool)
+            or not isinstance(distance, (int, float))
+            or not 0.5 <= distance <= 4.0
+        ):
+            raise ValueError(
+                "Throw distance must be between 0.5 and 4.0 metres"
             )
 
     elif name in ("pickup", "drop", "give_up"):

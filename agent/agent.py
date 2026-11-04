@@ -1,7 +1,6 @@
 
 import argparse
 import os
-import time
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -19,8 +18,10 @@ from agent.tools import (
     get_depth,
     start_run,
     end_run,
+    reset_scene,
 )
 from agent.logger import RunLogger
+from agent.path_overlay import add_path_guide
 
 
 MAX_STEPS = 60
@@ -47,7 +48,7 @@ def dummy_decision(step):
     }
 
 
-def run_agent(command, mode):
+def run_agent(command, mode, reset=False, final=False):
     run_id = datetime.now().strftime(
         "%Y%m%d_%H%M%S"
     )
@@ -61,6 +62,19 @@ def run_agent(command, mode):
     print("Mode:", mode)
     print("Command:", command)
     print("Run ID:", run_id)
+
+    if mode == "claude":
+        # $40 team budget: practice runs stop at $30 so money is left for the judged runs.
+        # Judged runs (--final) always go ahead and are recorded separately.
+        model_type = "haiku" if "haiku" in MODEL.lower() else "sonnet"
+        if not budget.can_start_run(model_type, development=not final):
+            budget.show_summary()
+            print("Run NOT started: practice budget used up. Use --final for judged runs.")
+            return
+
+    if reset:
+        reset_scene()
+        print("Scene reset to start positions")
 
     start_run(command, run_id)
     outcome = "fail_not_reached"
@@ -78,17 +92,40 @@ def run_agent(command, mode):
         elif mode == "mock":
             from agent.mock_claude import MockClaudeClient
             claude = MockClaudeClient()
+        elif mode == "openrouter":
+            # Any OpenRouter model with image + tool support; development only, not judged runs.
+            from agent.openrouter_client import OpenRouterRobotClient, MODEL as OR_MODEL
+            claude = OpenRouterRobotClient()
+            print("OpenRouter model:", OR_MODEL)
+        elif mode == "vision":
+            # No-API stand-in that reads the camera pixels; for testing only, not judged runs.
+            from agent.vision_brain import VisionBrain
+            claude = VisionBrain()
 
+        # Brief: one /look after each /move or /turn, and never two images in a row
+        # without a move or turn in between. After pickup/drop/throw (or a rejected
+        # action) the model gets no new image, only the tool result.
+        need_look = True
+        image = depth = None
         for step in range(MAX_STEPS):
-            image = get_image()
-            depth = get_depth()
+            new_image = need_look
+            if need_look:
+                image = get_image()
+                depth = get_depth()
+                if mode in ("claude", "openrouter"):
+                    # Show the model how wide the robot's path is (camera geometry only, no object data).
+                    image = add_path_guide(image)
 
             if mode == "dummy":
                 decision = dummy_decision(step)
                 if decision is None:
                     break
+            elif mode in ("claude", "openrouter"):
+                decision = claude.decide(command, image if new_image else None, depth)
             else:
+                # The pixel-based stand-ins are not Claude; they can reuse the last frame.
                 decision = claude.decide(command, image, depth)
+            if mode == "claude":
                 model_type = "haiku" if "haiku" in MODEL.lower() else "sonnet"
                 step_cost = budget.estimate_cost(
                     model_type,
@@ -105,7 +142,7 @@ def run_agent(command, mode):
             print("Arguments:", arguments)
 
             if action == "give_up":
-                if mode in ("mock", "claude"):
+                if mode in ("mock", "claude", "vision", "openrouter"):
                     claude.record_result({
                         "gave_up": True,
                         "reason": arguments.get("reason", ""),
@@ -116,7 +153,7 @@ def run_agent(command, mode):
             engine_args = {}
             if action == "turn":
                 engine_args["degrees"] = arguments["degrees"]
-            elif action == "move":
+            elif action in ("move", "throw"):
                 engine_args["distance"] = arguments["distance"]
             elif action not in ("pickup", "drop"):
                 raise ValueError(f"Unknown action: {action}")
@@ -132,6 +169,9 @@ def run_agent(command, mode):
                 }
                 print("Action rejected:", error)
 
+            # Only a move or turn that actually ran changes the view.
+            need_look = action in ("move", "turn") and not result.get("action_rejected")
+
             if result.get("collided") is True:
                 collision_count += 1
                 print(f"Collision detected! Total: {collision_count}")
@@ -141,7 +181,7 @@ def run_agent(command, mode):
             if collision_count >= 3:
                 print("WARNING: Three consecutive collisions. Robot may be stuck.")
 
-            if mode in ("mock", "claude"):
+            if mode in ("mock", "claude", "vision", "openrouter"):
                 claude.record_result(result)
 
             logger.save_step(
@@ -161,14 +201,14 @@ def run_agent(command, mode):
                 print("Engine ended the run.")
                 break
 
-            if action == "drop" and result.get("success") and result.get("in_zone"):
+            if action in ("drop", "throw") and result.get("success") and result.get("in_zone"):
                 print("\nDelivery confirmed!")
                 outcome = "pass"
                 break
-            time.sleep(0.5)
+            # (no pause between steps: the engine replies only after the motion ends)
 
         if mode == "claude":
-            budget.record_run(run_id, run_cost)
+            budget.record_run(run_id, run_cost, development=not final)
             budget.show_summary()
         print("\nRUN COMPLETED")
         print("Logs saved in:", logger.run_folder)
@@ -187,13 +227,25 @@ def main():
 
     parser.add_argument(
         "--mode",
-        choices=["dummy", "mock", "claude"],
+        choices=["dummy", "mock", "claude", "vision", "openrouter"],
         default="dummy"
+    )
+
+    parser.add_argument(
+        "--final",
+        action="store_true",
+        help="judged run: always allowed by the budget guard, not counted as practice",
+    )
+
+    parser.add_argument(
+        "--reset",
+        action="store_true",
+        help="put the robot and objects back at their start positions first",
     )
 
     args = parser.parse_args()
 
-    run_agent(args.command, args.mode)
+    run_agent(args.command, args.mode, reset=args.reset, final=args.final)
 
 
 if __name__ == "__main__":

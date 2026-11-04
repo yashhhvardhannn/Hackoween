@@ -191,6 +191,19 @@ class World:
         self.held = None
         return True, self.in_zone(o.x, o.y)
 
+    def throw(self, distance):
+        """Like drop, but the object lands `distance` m in front of the robot (0.5-4.0)."""
+        if not self.held:
+            return False, False
+        self.state = "Drop"
+        d = min(max(distance, 0.5), 4.0)
+        fx, fy = self.forward()
+        o = self.held
+        o.x, o.y = self.x + fx * (ROBOT_RADIUS + d), self.y + fy * (ROBOT_RADIUS + d)
+        self.objects.append(o)
+        self.held = None
+        return True, self.in_zone(o.x, o.y)
+
     def depth(self):
         """Single ray straight ahead: distance to the nearest thing, max 10 m."""
         fx, fy = self.forward()
@@ -357,6 +370,12 @@ def pickup():
 @app.post("/drop")
 def drop():
     success, in_zone = world.drop()
+    return {"success": success, "in_zone": in_zone}
+
+
+@app.post("/throw")
+def throw(body: MoveBody):
+    success, in_zone = world.throw(body.distance)
     return {"success": success, "in_zone": in_zone}
 
 
