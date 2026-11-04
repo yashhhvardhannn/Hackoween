@@ -1,7 +1,6 @@
 
 import argparse
 import os
-import time
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -184,7 +183,7 @@ def run_agent(command, mode, reset=False):
                 print("\nDelivery confirmed!")
                 outcome = "pass"
                 break
-            time.sleep(0.5)
+            # (no pause between steps: the engine replies only after the motion ends)
 
         if mode == "claude":
             budget.record_run(run_id, run_cost)

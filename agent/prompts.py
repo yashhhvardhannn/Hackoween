@@ -68,10 +68,12 @@ DEPTH READING:
 
 SEARCH STRATEGY:
 If the target object is not visible:
-- Turn approximately 60 degrees.
+- Turn 90 degrees (the camera sees 90 degrees, so
+  four turns cover the whole room).
 - Examine the next camera image.
-- Continue until you have searched 360 degrees.
-- Remember what was visible in previous directions.
+- Remember what was visible in each direction,
+  ESPECIALLY the flat drop zone marker on the floor:
+  you will need its direction later.
 - If the object is still missing, move to an open
   area and search again.
 
@@ -99,6 +101,11 @@ x = 320 -> target is centred
 x = 400 -> turn +14 degrees
 x = 480 -> turn +27 degrees
 
+If the target's centre is between x = 260 and
+x = 380, do NOT turn: it is close enough to centred,
+move straight away. Never spend a step on a turn
+smaller than 10 degrees.
+
 DISTANCE GUIDANCE:
 Estimate distance using the bottom of the object
 in the camera image.
@@ -113,16 +120,18 @@ y = 480 -> 0.47 metres
 
 These are approximate estimates, not exact measurements.
 
-APPROACH STRATEGY:
-1. Locate the requested object.
-2. Turn until it is near the centre of the image.
-3. Estimate the distance to it.
-4. Move most of the estimated distance, leaving
-   a safety margin.
-5. Examine the new camera image.
-6. Use the optional depth reading for proximity.
-7. Attempt pickup only when close and aligned.
-8. Check whether pickup succeeded.
+APPROACH STRATEGY (aim for 2-3 actions):
+1. Turn once so the target is roughly centred.
+2. If the strip to it is clear, move (distance to
+   the object's base - 0.3 m) in ONE move (up to
+   1.5 m per move). Do not stop half way to look.
+3. Pickup reaches 0.5 m from the robot's front to
+   the object's CENTRE. Call pickup when the object's
+   base is cut off by the bottom edge of the image and
+   the object is between the guide lines. If its base
+   is still visible, move (distance to base) + 0.1 m
+   first. Do not creep forward in small steps.
+4. If pickup fails, move forward 0.2 m and retry.
 
 DELIVERY STRATEGY:
 After successful pickup:
@@ -134,7 +143,11 @@ After successful pickup:
    driving, note every object you saw near the route
    (including ones partly hidden behind the held
    object) and steer so they are outside the guide
-   lines. Use moves of at most 1.0 m while carrying.
+   lines. Use full 1.5 m moves when the strip is
+   clear.
+   If you saw the drop zone during the search, turn
+   straight towards it using that memory instead of
+   scanning again.
 4. Stop inside the zone.
 5. Drop the object.
 6. Check whether the drop was successful.
@@ -155,7 +168,9 @@ EFFICIENCY:
 - Avoid unnecessary full-room rescanning.
 - Use larger movements when far from obstacles.
 - Use smaller movements when close to objects.
-- Aim to complete tasks within 25 tool actions.
+- Aim to complete tasks within 10 tool actions.
+  Every action costs about 4 seconds, so each extra
+  small correction makes the run slower.
 - Never exceed the controller's 60-step limit.
 
 REASONING:

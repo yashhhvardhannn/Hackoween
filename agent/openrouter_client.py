@@ -30,6 +30,7 @@ from tools.leak_check import check_request
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-v4.1-flash")
 MAX_ATTEMPTS = 3
+THINKING = os.getenv("OPENROUTER_THINKING", "1") != "0"
 
 # Same tools as the Claude client, in OpenAI/OpenRouter "function" format.
 OPENAI_TOOLS = [
@@ -86,8 +87,9 @@ class OpenRouterRobotClient:
             "model": MODEL,
             # Room for models that "think" before answering; too small a limit gives empty replies.
             "max_tokens": 6000,
-            # Keep the hidden "thinking" short: one action per step does not need long reasoning.
-            "reasoning": {"effort": "low"},
+            # Hidden "thinking": on by default (5-25 s per step, much better driving).
+            # OPENROUTER_THINKING=0 in .env makes steps ~1.5 s, but the model gets lost more often.
+            "reasoning": {"effort": "low"} if THINKING else {"enabled": False},
             "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + self.history,
             "tools": OPENAI_TOOLS,
             "tool_choice": "required",
