@@ -5,6 +5,7 @@ import os
 from anthropic import Anthropic
 
 from agent.prompts import SYSTEM_PROMPT
+from tools.leak_check import check_request
 
 
 MODEL = os.getenv(
@@ -85,6 +86,14 @@ ROBOT_TOOLS = [
     }
 ]
 
+CACHED_TOOLS = [
+    *ROBOT_TOOLS[:-1],
+    {
+        **ROBOT_TOOLS[-1],
+        "cache_control": {"type": "ephemeral"},
+    },
+]
+
 
 class ClaudeRobotClient:
     def __init__(self):
@@ -92,7 +101,7 @@ class ClaudeRobotClient:
         self.history = []
         self.pending_tool_id = None
 
-    def decide(self, command, image_bytes):
+    def decide(self, command, image_bytes, depth=None):
         if self.pending_tool_id is not None:
             raise RuntimeError(
                 "Previous tool result has not been recorded"
@@ -102,11 +111,12 @@ class ClaudeRobotClient:
             image_bytes
         ).decode("utf-8")
 
-        content = [
+        current_content = [
             {
                 "type": "text",
                 "text": (
                     f"Task: {command}\n"
+                    f"Latest depth reading: {depth!r}\n"
                     "Here is the latest camera image. "
                     "Choose exactly one robot action."
                 )
@@ -126,10 +136,10 @@ class ClaudeRobotClient:
         for message in self.history:
             if message.get("role") != "user":
                 continue
-            content = message.get("content")
-            if isinstance(content, list) and any(
+            old_content = message.get("content")
+            if isinstance(old_content, list) and any(
                 block.get("type") == "image"
-                for block in content
+                for block in old_content
                 if isinstance(block, dict)
             ):
                 message["content"] = [
@@ -141,14 +151,25 @@ class ClaudeRobotClient:
 
         self.history.append({
             "role": "user",
-            "content": content
+            "content": current_content
         })
+
+        request = {
+            "system": SYSTEM_PROMPT,
+            "tools": CACHED_TOOLS,
+            "messages": self.history,
+        }
+        check_request(request, command)
 
         response = self.client.messages.create(
             model=MODEL,
             max_tokens=500,
-            system=SYSTEM_PROMPT,
-            tools=ROBOT_TOOLS,
+            system=[{
+                "type": "text",
+                "text": SYSTEM_PROMPT,
+                "cache_control": {"type": "ephemeral"},
+            }],
+            tools=CACHED_TOOLS,
             tool_choice={"type": "any"},
             messages=self.history
         )

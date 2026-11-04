@@ -16,6 +16,7 @@ from agent.tools import (
     get_image,
     execute_action,
     validate_action,
+    get_depth,
     start_run,
     end_run,
 )
@@ -62,7 +63,7 @@ def run_agent(command, mode):
     print("Run ID:", run_id)
 
     start_run(command, run_id)
-    outcome = "fail"
+    outcome = "fail_not_reached"
 
     claude = None
     try:
@@ -80,13 +81,14 @@ def run_agent(command, mode):
 
         for step in range(MAX_STEPS):
             image = get_image()
+            depth = get_depth()
 
             if mode == "dummy":
                 decision = dummy_decision(step)
                 if decision is None:
                     break
             else:
-                decision = claude.decide(command, image)
+                decision = claude.decide(command, image, depth)
                 model_type = "haiku" if "haiku" in MODEL.lower() else "sonnet"
                 step_cost = budget.estimate_cost(
                     model_type,
@@ -153,6 +155,11 @@ def run_agent(command, mode):
             )
             print("Result:", result)
             print("Logged successfully")
+
+            if result.get("state") == "Done":
+                outcome = "fail_collision" if result.get("collided") else "fail_not_reached"
+                print("Engine ended the run.")
+                break
 
             if action == "drop" and result.get("success") and result.get("in_zone"):
                 print("\nDelivery confirmed!")

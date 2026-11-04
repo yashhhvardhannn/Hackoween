@@ -16,7 +16,7 @@ class MockClaudeClient:
             ("drop", {})
         ]
 
-    def decide(self, command, image_bytes):
+    def decide(self, command, image_bytes, depth=None):
         if self.waiting_for_result:
             raise RuntimeError(
                 "Previous tool result was not recorded"
