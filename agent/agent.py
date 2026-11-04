@@ -93,28 +93,38 @@ def run_agent(command, mode, reset=False):
             from agent.vision_brain import VisionBrain
             claude = VisionBrain()
 
+        # Brief: one /look after each /move or /turn, and never two images in a row
+        # without a move or turn in between. After pickup/drop/throw (or a rejected
+        # action) the model gets no new image, only the tool result.
+        need_look = True
+        image = depth = None
         for step in range(MAX_STEPS):
-            image = get_image()
-            depth = get_depth()
-            if mode in ("claude", "openrouter"):
-                # Show the model how wide the robot's path is (camera geometry only, no object data).
-                image = add_path_guide(image)
+            new_image = need_look
+            if need_look:
+                image = get_image()
+                depth = get_depth()
+                if mode in ("claude", "openrouter"):
+                    # Show the model how wide the robot's path is (camera geometry only, no object data).
+                    image = add_path_guide(image)
 
             if mode == "dummy":
                 decision = dummy_decision(step)
                 if decision is None:
                     break
+            elif mode in ("claude", "openrouter"):
+                decision = claude.decide(command, image if new_image else None, depth)
             else:
+                # The pixel-based stand-ins are not Claude; they can reuse the last frame.
                 decision = claude.decide(command, image, depth)
-                if mode == "claude":
-                    model_type = "haiku" if "haiku" in MODEL.lower() else "sonnet"
-                    step_cost = budget.estimate_cost(
-                        model_type,
-                        decision["input_tokens"],
-                        decision["output_tokens"],
-                    )
-                    run_cost += step_cost
-                    print(f"Estimated API cost: ${step_cost:.6f}")
+            if mode == "claude":
+                model_type = "haiku" if "haiku" in MODEL.lower() else "sonnet"
+                step_cost = budget.estimate_cost(
+                    model_type,
+                    decision["input_tokens"],
+                    decision["output_tokens"],
+                )
+                run_cost += step_cost
+                print(f"Estimated API cost: ${step_cost:.6f}")
 
             action = decision["name"]
             arguments = decision["arguments"]
@@ -149,6 +159,9 @@ def run_agent(command, mode, reset=False):
                     "action_rejected": True,
                 }
                 print("Action rejected:", error)
+
+            # Only a move or turn that actually ran changes the view.
+            need_look = action in ("move", "turn") and not result.get("action_rejected")
 
             if result.get("collided") is True:
                 collision_count += 1

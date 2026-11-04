@@ -20,6 +20,9 @@ IMPORTANT RULES:
 9. Never claim to see something that is not visible.
 10. Do not assume pickup or drop succeeded without
     checking the tool response.
+11. You get a new camera image only after a move or
+    turn. After pickup, drop or throw the view has not
+    changed: decide from the last image and the result.
 
 AVAILABLE ACTIONS:
 - turn(degrees, observation, reasoning)

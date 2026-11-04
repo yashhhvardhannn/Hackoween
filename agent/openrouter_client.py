@@ -47,6 +47,12 @@ OPENAI_TOOLS = [
 TOOL_NAMES = {t["name"] for t in ROBOT_TOOLS}
 
 
+NO_NEW_IMAGE = (
+    "No new camera image: the robot has not moved or turned since the last one, "
+    "so the view is unchanged. Use the last image and the tool result."
+)
+
+
 class OpenRouterRobotClient:
     def __init__(self):
         self.api_key = os.getenv("OPENROUTER_API_KEY")
@@ -58,6 +64,13 @@ class OpenRouterRobotClient:
     def decide(self, command, image_bytes, depth=None):
         if self.pending_tool_id is not None:
             raise RuntimeError("Previous tool result has not been recorded")
+
+        if image_bytes is None:
+            # Brief: no second image without a move/turn in between; keep the last image as is.
+            self.history.append({"role": "user", "content": (
+                f"Task: {command}\n{NO_NEW_IMAGE} Choose exactly one robot action."
+            )})
+            return self._ask(command)
 
         # Only the newest camera frame is sent as an image; older ones become one line of text.
         for message in self.history:
@@ -80,6 +93,9 @@ class OpenRouterRobotClient:
             ],
         })
 
+        return self._ask(command)
+
+    def _ask(self, command):
         # Leak check on the same content (text only; the image is pixels).
         check_request({"system": SYSTEM_PROMPT, "tools": OPENAI_TOOLS, "messages": self._text_only()}, command)
 
