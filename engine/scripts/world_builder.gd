@@ -8,6 +8,11 @@ const TURN_SPEED := 90.0
 const PICKUP_REACH := 0.5
 const PICKUP_HALF_ANGLE := 30.0
 const MAX_DEPTH := 10.0
+const BACK_OFF := 0.1          # brief: on collision, back off 0.1 m
+const STUCK_SECONDS := 2.0     # brief: no movement for 2 s counts as blocked
+const MAX_RETRIES := 3         # brief: fail after 3 retries
+const POV_SIZE := Vector2i(1280, 720)  # Phase 2 clips: 720p
+const DROP_ZONE_CENTER := Vector3(-2.5, 0, 2.5)
 const LOOK_SIZE := Vector2i(640, 480)
 const PANEL_SIZE := Vector2i(400, 260)
 
@@ -16,7 +21,10 @@ var pickup_area: Area3D
 var pickup_point: Marker3D
 var held: RigidBody3D
 var heading := 0.0
+# State names follow plan.md section 2 exactly:
+# Idle | Locate | GoToObject | PickUp | Carry | Drop | Done | Blocked
 var state_name := "Idle"
+var outcome := ""              # pass | fail_collision | fail_not_reached | fail_wrong_object
 var retries := 0
 var collided := false
 var busy := false
@@ -24,11 +32,17 @@ var busy := false
 var look_vp: SubViewport
 var overview_vp: SubViewport
 var pickup_vp: SubViewport
+var pov_vp: SubViewport        # 1280x720 copy of the robot camera, for clip frames
+var pov_cam: Camera3D
+var capturing := false
+var capture_dir := ""
+var capture_frame := 0
 var look_cam: Camera3D
 var overview_cam: Camera3D
 var pickup_cam: Camera3D
 
 var trail_points: Array[Vector3] = []
+var start_transforms := {}     # pickable body -> starting transform, for /reset
 var trail_node: MeshInstance3D
 var trail_color := Color(0.1, 0.55, 1.0)
 
@@ -43,9 +57,9 @@ func _ready() -> void:
 	_build_cameras()
 	_build_trail()
 	_build_ui()
-	var err := server.listen(PORT, "127.0.0.1")
+	var err := server.listen(PORT, "*")  # "*" so other laptops on the Wi-Fi can connect
 	if err == OK:
-		print("Robot HTTP API: http://127.0.0.1:%d" % PORT)
+		print("Robot HTTP API: http://localhost:%d" % PORT)
 	else:
 		push_error("Could not listen on port %d. Error %d" % [PORT, err])
 	print("Keys: W/S move, A/D turn, E pickup, Q drop, T throw, R reset, P save /look")
@@ -136,6 +150,7 @@ func _make_object(n: String, kind: String, color: Color, pos: Vector3) -> void:
 	body.collision_layer = 2
 	body.collision_mask = 1 | 2
 	body.add_to_group("pickable")
+	start_transforms[body] = Transform3D(Basis(), pos)
 	var mesh := MeshInstance3D.new()
 	var cs := CollisionShape3D.new()
 	match kind:
@@ -279,6 +294,10 @@ func _build_cameras() -> void:
 	var c := _new_viewport("PickupViewport", PANEL_SIZE, "PickupCamera")
 	pickup_vp = c[0]
 	pickup_cam = c[1]
+	var d := _new_viewport("PovViewport", POV_SIZE, "PovCamera")
+	pov_vp = d[0]
+	pov_cam = d[1]
+	# Same 90-degree horizontal view as the agent camera (KEEP_WIDTH), at 720p for the clips.
 	# The subviewports share the main scene World3D. Update their cameras from robot pose.
 	overview_cam.position = Vector3(-7, 6, 7)
 	overview_cam.look_at(Vector3.ZERO)
@@ -293,6 +312,7 @@ func _update_cameras() -> void:
 	var fwd := _forward()
 	look_cam.global_position = robot.global_position + Vector3.UP * 0.5
 	look_cam.look_at(look_cam.global_position + fwd + Vector3.DOWN * 0.18, Vector3.UP)
+	pov_cam.global_transform = look_cam.global_transform
 	# Close, downward-angled view of the pickup point. Keep the camera just
 	# behind the robot's front so the target stays in frame as the robot approaches.
 	pickup_cam.global_position = robot.global_position + fwd * 0.18 + Vector3.UP * 1.05
@@ -394,28 +414,41 @@ func _move(distance: float) -> Dictionary:
 		return {"error": "busy", "moved": 0.0, "collided": false}
 	busy = true
 	collided = false
-	state_name = "Carry" if held != null else "Go to object"
+	state_name = "Carry" if held != null else "GoToObject"
 	trail_color = Color(0.1, 0.85, 0.3) if held != null else Color(0.1, 0.55, 1.0)
 	_rebuild_trail()
 	var dir := _forward() * signf(distance)
 	var remaining := absf(distance)
 	var moved := 0.0
+	var still_for := 0.0
 	while remaining > 0.001:
 		await get_tree().physics_frame
-		var step := minf(SPEED * get_physics_process_delta_time(), remaining)
+		var dt := get_physics_process_delta_time()
+		var step := minf(SPEED * dt, remaining)
+		var before := robot.global_position
 		var hit := robot.move_and_collide(dir * step)
-		if hit != null:
+		var progress := (robot.global_position - before).length()
+		still_for = still_for + dt if progress < 0.0005 else 0.0
+		if hit != null or still_for >= STUCK_SECONDS:
 			collided = true
-			state_name = "Blocked"
-			retries += 1
-			trail_color = Color(1.0, 0.5, 0.05)
-			_rebuild_trail()
 			break
 		remaining -= step
 		moved += step
 		_add_trail()
+		_capture_frame()
+	if collided:
+		# Brief: stop, back off 0.1 m, report the collision, enter Blocked; fail after 3 retries.
+		robot.move_and_collide(-dir * BACK_OFF)
+		moved = maxf(moved - BACK_OFF, 0.0)
+		retries += 1
+		trail_color = Color(1.0, 0.5, 0.05)
+		_rebuild_trail()
+		if retries > MAX_RETRIES:
+			_end_run("fail_collision")
+		else:
+			state_name = "Blocked"
 	busy = false
-	return {"moved": snappedf(moved, 0.001), "collided": collided}
+	return {"moved": snappedf(moved * signf(distance), 0.001), "collided": collided}
 
 func _turn(degrees: float) -> Dictionary:
 	if busy:
@@ -429,12 +462,16 @@ func _turn(degrees: float) -> Dictionary:
 		heading = fposmod(heading + sign_turn * step, 360.0)
 		remaining -= step
 		_sync_heading()
+		_capture_frame()
+	if state_name != "Done":
+		state_name = "Carry" if held != null else "Locate"
 	busy = false
-	return {"heading": snappedf(heading, 0.1)}
+	return {"turned": snappedf(degrees, 0.01)}
 
 func _pickup() -> Dictionary:
 	if held != null:
 		return {"ok": false}
+	state_name = "PickUp"
 	var best: RigidBody3D = null
 	var best_d := INF
 	var fwd := _forward()
@@ -452,6 +489,7 @@ func _pickup() -> Dictionary:
 			best = body
 			best_d = d
 	if best == null:
+		state_name = "GoToObject"
 		return {"ok": false}
 	held = best
 	held.freeze = true
@@ -480,9 +518,11 @@ func _drop() -> Dictionary:
 	obj.collision_mask = 1 | 2
 	held = null
 	await get_tree().physics_frame
-	var delta := obj.global_position - Vector3(-2.5, 0, 2.5)
+	var delta := obj.global_position - DROP_ZONE_CENTER
 	var inside := absf(delta.x) <= 0.5 and absf(delta.z) <= 0.5
-	state_name = "Done" if inside else "Drop"
+	state_name = "Drop"
+	if inside:
+		_end_run("pass")
 	return {"ok": true, "in_zone": inside}
 
 func _throw(power: float) -> Dictionary:
@@ -502,8 +542,18 @@ func _throw(power: float) -> Dictionary:
 	return {"ok": true}
 
 func _reset() -> void:
-	if held != null:
-		_drop()
+	# Put everything back where it started, without reloading the scene
+	# (reloading would briefly stop the HTTP server and drop requests).
+	if held != null and is_instance_valid(held):
+		held.reparent(self, true)
+		held.collision_layer = 2
+		held.collision_mask = 1 | 2
+		held.freeze = false
+		held = null
+	for body in start_transforms:
+		body.global_transform = start_transforms[body]
+		body.linear_velocity = Vector3.ZERO
+		body.angular_velocity = Vector3.ZERO
 	robot.position = Vector3(-3, 0, 0)
 	robot.velocity = Vector3.ZERO
 	heading = 0.0
@@ -511,6 +561,8 @@ func _reset() -> void:
 	retries = 0
 	collided = false
 	state_name = "Idle"
+	outcome = ""
+	capturing = false
 	trail_points.clear()
 	trail_color = Color(0.1, 0.55, 1.0)
 	_rebuild_trail()
@@ -522,7 +574,39 @@ func _save_look() -> void:
 	image.save_jpg("user://look.jpg", 0.9)
 	print("Saved camera image to: ", ProjectSettings.globalize_path("user://look.jpg"))
 
-# ---------------- HTTP server ----------------
+# ---------------- run lifecycle and clip frames ----------------
+
+func _start_run(run_id: String) -> void:
+	retries = 0
+	collided = false
+	outcome = ""
+	state_name = "Locate"
+	# Frames are saved only while the robot moves/turns (engine time), so a
+	# 1-2 minute run with Claude thinking becomes a 10-20 s clip.
+	capture_dir = ProjectSettings.globalize_path("res://").path_join("../runs/%s/pov" % run_id).simplify_path()
+	capture_frame = 0
+	capturing = DisplayServer.get_name() != "headless"
+	if capturing:
+		DirAccess.make_dir_recursive_absolute(capture_dir)
+
+func _end_run(result: String) -> void:
+	if state_name != "Done":
+		outcome = result
+	state_name = "Done"
+	capturing = false
+
+func _capture_frame() -> void:
+	# Physics runs at 60 Hz; keep every other frame for a 30 FPS clip.
+	if not capturing or Engine.get_physics_frames() % 2 != 0:
+		return
+	var img := pov_vp.get_texture().get_image()
+	if img != null:
+		img.save_png(capture_dir.path_join("%05d.png" % capture_frame))
+		capture_frame += 1
+
+# ---------------- HTTP server (plan.md section 2) ----------------
+# Every reply below is built from an explicit list of keys, so internal data
+# (object names, colours, positions) can never reach the agent.
 
 func _poll_server() -> void:
 	if not server.is_listening() or handling_request:
@@ -540,34 +624,56 @@ func _serve_peer() -> void:
 	var method: String = req["method"]
 	var path: String = req["path"]
 	var body: Dictionary = req["body"]
-	match path:
-		"/state":
+	match method + " " + path:
+		"GET /state":
 			_send_json(200, _state())
-		"/look":
+		"GET /look":
 			await _send_look()
-		"/depth":
+		"GET /depth":
 			_send_json(200, {"distance": _depth()})
-		"/collision":
-			_send_json(200, {"collided": collided})
-		"/move":
-			if method == "POST":
-				_send_json(200, await _move(float(body.get("distance", 0.0))))
+		"POST /move":
+			if not body.has("distance"):
+				_send_json(400, {"error": "missing distance"})
+			elif state_name == "Done":
+				_send_json(200, {"moved": 0.0, "collided": false, "state": state_name})
 			else:
-				_send_json(405, {"error": "method_not_allowed"})
-		"/turn":
-			if method == "POST":
-				_send_json(200, await _turn(float(body.get("degrees", 0.0))))
+				var r := await _move(float(body["distance"]))
+				if r.has("error"):
+					_send_json(409, {"error": "busy"})
+				else:
+					_send_json(200, {"moved": r["moved"], "collided": r["collided"], "state": state_name})
+		"POST /turn":
+			if not body.has("degrees"):
+				_send_json(400, {"error": "missing degrees"})
+			elif state_name == "Done":
+				_send_json(200, {"turned": 0.0, "state": state_name})
 			else:
-				_send_json(405, {"error": "method_not_allowed"})
-		"/pickup":
-			_send_json(200, _pickup() if method == "POST" else {"error": "method_not_allowed"})
-		"/drop":
-			if method == "POST":
-				_send_json(200, await _drop())
+				var r := await _turn(float(body["degrees"]))
+				if r.has("error"):
+					_send_json(409, {"error": "busy"})
+				else:
+					_send_json(200, {"turned": r["turned"], "state": state_name})
+		"POST /pickup":
+			if state_name == "Done":
+				_send_json(200, {"success": false})
 			else:
-				_send_json(405, {"error": "method_not_allowed"})
-		"/throw":
-			_send_json(200, _throw(float(body.get("impulse", 3.0))) if method == "POST" else {"error": "method_not_allowed"})
+				_send_json(200, {"success": bool(_pickup()["ok"])})
+		"POST /drop":
+			if state_name == "Done":
+				_send_json(200, {"success": false, "in_zone": false})
+			else:
+				var r := await _drop()
+				_send_json(200, {"success": bool(r["ok"]), "in_zone": bool(r["in_zone"])})
+		"POST /run/start":
+			# The command is only for the clip overlay (added later by tools/make_clip.py); never echoed.
+			_start_run(str(body.get("run_id", "run")))
+			_send_json(200, {"ok": true})
+		"POST /run/end":
+			_end_run(str(body.get("outcome", "fail_not_reached")))
+			_send_json(200, {"ok": true})
+		"POST /reset":
+			_reset()
+			_send_json(200, {"ok": true})
 		_:
 			_send_json(404, {"error": "not_found"})
 	_close_peer()
@@ -578,7 +684,10 @@ func _read_http_request() -> Dictionary:
 	var length := 0
 	var deadline := Time.get_ticks_msec() + 3000
 	while Time.get_ticks_msec() < deadline:
-		if peer == null or peer.get_status() != StreamPeerTCP.STATUS_CONNECTED:
+		if peer == null:
+			return {}
+		peer.poll()
+		if peer.get_status() != StreamPeerTCP.STATUS_CONNECTED:
 			return {}
 		var count := peer.get_available_bytes()
 		if count > 0:
@@ -610,14 +719,18 @@ func _read_http_request() -> Dictionary:
 
 func _send_json(status: int, payload: Dictionary) -> void:
 	var bytes := JSON.stringify(payload).to_utf8_buffer()
-	var reason := "OK" if status == 200 else ("Not Found" if status == 404 else "Method Not Allowed")
+	var reason: String = {200: "OK", 400: "Bad Request", 404: "Not Found", 409: "Conflict"}.get(status, "Error")
 	var header := "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" % [status, reason, bytes.size()]
 	peer.put_data(header.to_utf8_buffer())
 	peer.put_data(bytes)
 
 func _send_look() -> void:
-	await RenderingServer.frame_post_draw
-	var bytes := look_vp.get_texture().get_image().save_jpg_to_buffer(0.88)
+	var bytes: PackedByteArray
+	if DisplayServer.get_name() == "headless":  # nothing is drawn headless: send a blank frame
+		bytes = Image.create_empty(LOOK_SIZE.x, LOOK_SIZE.y, false, Image.FORMAT_RGB8).save_jpg_to_buffer(0.88)
+	else:
+		await RenderingServer.frame_post_draw
+		bytes = look_vp.get_texture().get_image().save_jpg_to_buffer(0.88)
 	var header := "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n" % bytes.size()
 	peer.put_data(header.to_utf8_buffer())
 	peer.put_data(bytes)
@@ -631,10 +744,10 @@ func _close_peer() -> void:
 func _state() -> Dictionary:
 	# Intentionally no object names, ids, colour, shape, coordinates, count or target distance.
 	return {
-		"name": state_name,
+		"state": state_name,
 		"x": snappedf(robot.global_position.x, 0.01),
 		"y": snappedf(robot.global_position.z, 0.01),
-		"heading": snappedf(heading, 0.1),
+		"heading": fposmod(snappedf(heading, 0.1), 360.0),
 		"holding": held != null,
 		"retries": retries
 	}
