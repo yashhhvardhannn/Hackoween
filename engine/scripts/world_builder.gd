@@ -19,7 +19,9 @@ const THROW_MIN := 0.5         # /throw distance range in metres
 const THROW_MAX := 4.0
 const THROW_SETTLE_MAX := 4.0  # seconds to wait for a thrown object to stop
 const LOOK_SIZE := Vector2i(640, 480)
-const PANEL_SIZE := Vector2i(400, 260)
+const RAMP_TIME := 0.25       # seconds to reach full speed / to stop (smooth starts and stops)
+const MIN_RAMP := 0.15
+const CLIP_FPS := 30.0
 
 var robot: CharacterBody3D
 var pickup_area: Area3D
@@ -35,16 +37,13 @@ var collided := false
 var busy := false
 
 var look_vp: SubViewport
-var overview_vp: SubViewport
-var pickup_vp: SubViewport
 var pov_vp: SubViewport        # 1280x720 copy of the robot camera, for clip frames
 var pov_cam: Camera3D
 var capturing := false
 var capture_dir := ""
 var capture_frame := 0
 var look_cam: Camera3D
-var overview_cam: Camera3D
-var pickup_cam: Camera3D
+var capture_accum := 0.0
 
 var trail_points: Array[Vector3] = []
 var start_transforms := {}     # pickable body -> starting transform, for /reset
@@ -55,8 +54,17 @@ var server := TCPServer.new()
 var peer: StreamPeerTCP
 var handling_request := false
 var state_label: Label
+var title_label: Label
 
 func _ready() -> void:
+	# Run physics at the screen's refresh rate (60-144 Hz) so motion is smooth on any display.
+	# Speeds use the frame time, and clip frames are taken by time (CLIP_FPS), so nothing else changes.
+	var hz := roundi(DisplayServer.screen_get_refresh_rate())
+	Engine.physics_ticks_per_second = clampi(hz, 60, 144) if hz > 0 else 60
+	# Optional start view: godot --path engine -- --view=front   (behind | front | overview)
+	for arg in OS.get_cmdline_user_args():
+		if arg.begins_with("--view="):
+			view_mode = maxi(0, ["behind", "front", "overview"].find(arg.get_slice("=", 1)))
 	_build_world()
 	_build_robot()
 	_build_cameras()
@@ -69,8 +77,10 @@ func _ready() -> void:
 		push_error("Could not listen on port %d. Error %d" % [PORT, err])
 	print("Keys: W/S move, A/D turn, E pickup, Q drop, T throw, R reset, P save /look")
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	_update_cameras()
+	_animate_robot(delta)
+	_update_chase(delta)
 	_update_ui()
 	_poll_server()
 
@@ -87,24 +97,67 @@ func _unhandled_key_input(event: InputEvent) -> void:
 		KEY_T: _throw(3.0)
 		KEY_R: _reset()
 		KEY_P: _save_look()
+		KEY_V: view_mode = (view_mode + 1) % 3
 
 # ---------------- world ----------------
 
-func _mat(color: Color) -> StandardMaterial3D:
+const WALL_HEIGHT := 2.0
+const AGENT_EXPOSURE := 0.78   # keeps the floor in Claude's view mid-bright, not clipped white
+const FLOOR_SHADER := """
+shader_type spatial;
+uniform vec3 tint : source_color = vec3(0.72, 0.72, 0.72);
+uniform float tile = 1.0;
+varying vec3 wp;
+float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float noise(vec2 p) {
+	vec2 i = floor(p);
+	vec2 f = fract(p);
+	f = f * f * (3.0 - 2.0 * f);
+	return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x),
+			   mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
+}
+float fbm(vec2 p) {
+	float v = 0.0;
+	float a = 0.5;
+	for (int k = 0; k < 4; k++) { v += a * noise(p); p *= 2.03; a *= 0.5; }
+	return v;
+}
+void vertex() { wp = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz; }
+void fragment() {
+	// Polished concrete tiles: soft mottling, slight per-tile shade, thin grout lines.
+	vec2 p = wp.xz / tile;
+	vec2 g = abs(fract(p) - 0.5);
+	float grout = smoothstep(0.488, 0.497, max(g.x, g.y));
+	float fine = fbm(wp.xz * 4.0);
+	float broad = fbm(wp.xz * 0.5 + 11.0);
+	float per_tile = hash(floor(p) + 3.0) * 0.05;
+	vec3 col = tint * (0.9 + 0.1 * fine + 0.08 * broad - per_tile);
+	col = mix(col, tint * 0.6, grout * 0.7);
+	ALBEDO = col;
+	ROUGHNESS = mix(0.42 + 0.3 * fine, 0.9, grout);
+	SPECULAR = 0.45;
+}
+"""
+
+var main_env: Environment
+var agent_env: Environment     # neutral version for Claude's camera: same light, faithful colours
+var detail_normal: NoiseTexture2D
+
+func _mat(color: Color, rough := 0.85) -> StandardMaterial3D:
 	var m := StandardMaterial3D.new()
 	m.albedo_color = color
-	m.roughness = 0.85
+	m.roughness = rough
 	return m
 
-func _box_mesh(size: Vector3, color: Color) -> MeshInstance3D:
+func _box_mesh(size: Vector3, mat: Material) -> MeshInstance3D:
 	var mi := MeshInstance3D.new()
 	var mesh := BoxMesh.new()
 	mesh.size = size
 	mi.mesh = mesh
-	mi.material_override = _mat(color)
+	mi.material_override = mat
 	return mi
 
-func _static_box(n: String, size: Vector3, pos: Vector3, color: Color) -> void:
+func _static_box(n: String, size: Vector3, pos: Vector3, mat: Material) -> void:
 	var body := StaticBody3D.new()
 	body.name = n
 	body.position = pos
@@ -113,37 +166,167 @@ func _static_box(n: String, size: Vector3, pos: Vector3, color: Color) -> void:
 	shape.size = size
 	cs.shape = shape
 	body.add_child(cs)
-	body.add_child(_box_mesh(size, color))
+	body.add_child(_box_mesh(size, mat))
 	add_child(body)
 
+func _visual_box(size: Vector3, pos: Vector3, mat: Material) -> void:
+	var mi := _box_mesh(size, mat)
+	mi.position = pos
+	add_child(mi)
+
+func _floor_mat(tint: Color, tile: float) -> ShaderMaterial:
+	var sh := Shader.new()
+	sh.code = FLOOR_SHADER
+	var m := ShaderMaterial.new()
+	m.shader = sh
+	m.set_shader_parameter("tint", Vector3(tint.r, tint.g, tint.b))
+	m.set_shader_parameter("tile", tile)
+	return m
+
+func _make_detail_normal() -> NoiseTexture2D:
+	# One small tileable bump texture, reused for walls and objects (fine surface grain).
+	var noise := FastNoiseLite.new()
+	noise.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	noise.frequency = 0.06
+	noise.fractal_octaves = 4
+	var tex := NoiseTexture2D.new()
+	tex.width = 256
+	tex.height = 256
+	tex.seamless = true
+	tex.as_normal_map = true
+	tex.bump_strength = 2.0
+	tex.noise = noise
+	return tex
+
 func _build_world() -> void:
-	var env := Environment.new()
-	env.background_mode = Environment.BG_COLOR
-	env.background_color = Color(0.75, 0.85, 0.95)
-	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	env.ambient_light_color = Color.WHITE
-	env.ambient_light_energy = 0.7
+	detail_normal = _make_detail_normal()
+
+	# Sky, soft sky light, filmic tone mapping and a little glow for the robot's lights.
+	var sky_mat := ProceduralSkyMaterial.new()
+	sky_mat.sky_top_color = Color(0.36, 0.55, 0.84)
+	sky_mat.sky_horizon_color = Color(0.76, 0.83, 0.9)
+	sky_mat.ground_horizon_color = Color(0.66, 0.64, 0.6)
+	sky_mat.ground_bottom_color = Color(0.32, 0.3, 0.28)
+	sky_mat.sun_angle_max = 25.0
+	var sky := Sky.new()
+	sky.sky_material = sky_mat
+	main_env = Environment.new()
+	main_env.background_mode = Environment.BG_SKY
+	main_env.sky = sky
+	main_env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
+	main_env.ambient_light_energy = 0.5
+	# Mostly neutral room light with a little sky blue, so the floor reads as grey, not blue.
+	main_env.ambient_light_color = Color(0.86, 0.84, 0.8)
+	main_env.ambient_light_sky_contribution = 0.35
+	main_env.reflected_light_source = Environment.REFLECTION_SOURCE_SKY
+	main_env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
+	main_env.tonemap_exposure = 1.15
+	main_env.tonemap_white = 6.0
+	main_env.glow_enabled = true
+	main_env.glow_intensity = 0.35
+	main_env.glow_bloom = 0.03
+	main_env.glow_hdr_threshold = 1.1
+	main_env.adjustment_enabled = true
+	main_env.adjustment_saturation = 1.08
+	main_env.adjustment_contrast = 1.04
+	# The agent camera gets the same light but no tone curve, glow or colour grading,
+	# so the colours Claude sees stay faithful.
+	agent_env = main_env.duplicate()
+	agent_env.tonemap_mode = Environment.TONE_MAPPER_LINEAR
+	agent_env.tonemap_exposure = AGENT_EXPOSURE
+	agent_env.glow_enabled = false
+	agent_env.adjustment_enabled = false
+	if RenderingServer.get_current_rendering_method() == "forward_plus":
+		# Extra polish only available on the Forward+ renderer (main view and clips only).
+		main_env.ssao_enabled = true
+		main_env.ssao_intensity = 1.6
+		main_env.ssr_enabled = true
 	var we := WorldEnvironment.new()
-	we.environment = env
+	we.environment = main_env
 	add_child(we)
+
 	var sun := DirectionalLight3D.new()
-	sun.rotation_degrees = Vector3(-55, 35, 0)
+	sun.name = "Sun"
+	sun.rotation_degrees = Vector3(-58, 38, 0)
+	sun.light_color = Color(1.0, 0.95, 0.87)
+	sun.light_energy = 1.0
 	sun.shadow_enabled = true
+	sun.shadow_blur = 1.5
+	sun.directional_shadow_max_distance = 24.0
 	add_child(sun)
+	var fill := DirectionalLight3D.new()
+	fill.name = "Fill"
+	fill.rotation_degrees = Vector3(-30, -140, 0)
+	fill.light_color = Color(0.75, 0.84, 1.0)
+	fill.light_energy = 0.25
+	fill.light_specular = 0.0
+	add_child(fill)
 
-	_static_box("Floor", Vector3(8, 0.1, 8), Vector3(0, -0.05, 0), Color(0.84, 0.84, 0.81))
-	var wall := Color(0.42, 0.42, 0.46)
-	_static_box("NorthWall", Vector3(8.3, 1, 0.2), Vector3(0, 0.5, -4.1), wall)
-	_static_box("SouthWall", Vector3(8.3, 1, 0.2), Vector3(0, 0.5, 4.1), wall)
-	_static_box("WestWall", Vector3(0.2, 1, 8.3), Vector3(-4.1, 0.5, 0), wall)
-	_static_box("EastWall", Vector3(0.2, 1, 8.3), Vector3(4.1, 0.5, 0), wall)
+	# Room: tiled concrete floor, plaster walls with a dark skirting board and a cap.
+	_static_box("Floor", Vector3(8, 0.1, 8), Vector3(0, -0.05, 0), _floor_mat(Color(0.62, 0.61, 0.59), 1.0))
+	var plaster := _mat(Color(0.8, 0.79, 0.76), 0.92)
+	plaster.normal_enabled = true
+	plaster.normal_texture = detail_normal
+	plaster.normal_scale = 0.35
+	plaster.uv1_triplanar = true
+	plaster.uv1_scale = Vector3(0.6, 0.6, 0.6)
+	var h := WALL_HEIGHT
+	_static_box("NorthWall", Vector3(8.4, h, 0.2), Vector3(0, h / 2, -4.1), plaster)
+	_static_box("SouthWall", Vector3(8.4, h, 0.2), Vector3(0, h / 2, 4.1), plaster)
+	_static_box("WestWall", Vector3(0.2, h, 8.4), Vector3(-4.1, h / 2, 0), plaster)
+	_static_box("EastWall", Vector3(0.2, h, 8.4), Vector3(4.1, h / 2, 0), plaster)
+	var skirting := _mat(Color(0.2, 0.21, 0.23), 0.6)
+	_visual_box(Vector3(8.0, 0.12, 0.02), Vector3(0, 0.06, -3.99), skirting)
+	_visual_box(Vector3(8.0, 0.12, 0.02), Vector3(0, 0.06, 3.99), skirting)
+	_visual_box(Vector3(0.02, 0.12, 8.0), Vector3(-3.99, 0.06, 0), skirting)
+	_visual_box(Vector3(0.02, 0.12, 8.0), Vector3(3.99, 0.06, 0), skirting)
+	var cap := _mat(Color(0.62, 0.62, 0.63), 0.5)
+	_visual_box(Vector3(8.5, 0.05, 0.28), Vector3(0, h + 0.025, -4.1), cap)
+	_visual_box(Vector3(8.5, 0.05, 0.28), Vector3(0, h + 0.025, 4.1), cap)
+	_visual_box(Vector3(0.28, 0.05, 8.5), Vector3(-4.1, h + 0.025, 0), cap)
+	_visual_box(Vector3(0.28, 0.05, 8.5), Vector3(4.1, h + 0.025, 0), cap)
+	# Paved yard outside the room (only the third-person view ever sees it).
+	var yard := MeshInstance3D.new()
+	var plane := PlaneMesh.new()
+	plane.size = Vector2(80, 80)
+	yard.mesh = plane
+	yard.material_override = _floor_mat(Color(0.47, 0.45, 0.42), 2.0)
+	yard.position = Vector3(0, -0.01, 0)
+	yard.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(yard)
 
-	_make_object("CubeA", "cube", Color(0.9, 0.08, 0.08), Vector3(1.5, 0.16, -1.2))
-	_make_object("SphereB", "sphere", Color(0.9, 0.08, 0.08), Vector3(0.5, 0.16, 1.8))
-	_make_object("CubeC", "cube", Color(0.08, 0.18, 0.9), Vector3(2.5, 0.16, 1.0))
-	_make_object("CylinderD", "cylinder", Color(0.08, 0.72, 0.2), Vector3(0, 0.3, -2.5))
-	_make_object("ConeE", "cone", Color(0.98, 0.82, 0.05), Vector3(-0.5, 0.16, 0.2))
+	_make_object("CubeA", "cube", Color(0.86, 0.09, 0.08), Vector3(1.5, 0.16, -1.2))
+	_make_object("SphereB", "sphere", Color(0.86, 0.09, 0.08), Vector3(0.5, 0.16, 1.8))
+	_make_object("CubeC", "cube", Color(0.08, 0.2, 0.86), Vector3(2.5, 0.16, 1.0))
+	_make_object("CylinderD", "cylinder", Color(0.1, 0.62, 0.22), Vector3(0, 0.3, -2.5))
+	_make_object("ConeE", "cone", Color(0.97, 0.78, 0.06), Vector3(-0.5, 0.16, 0.2))
 	_make_drop_zone()
+
+func _object_mat(color: Color, kind: String) -> StandardMaterial3D:
+	# Same colours as before (Claude identifies by colour); real-world surfaces on top.
+	var m := StandardMaterial3D.new()
+	m.albedo_color = color
+	m.normal_enabled = true
+	m.normal_texture = detail_normal
+	m.uv1_triplanar = true
+	m.uv1_scale = Vector3(3, 3, 3)
+	match kind:
+		"cube":      # painted wood block
+			m.roughness = 0.55
+			m.normal_scale = 0.25
+		"sphere":    # glossy rubber ball
+			m.roughness = 0.22
+			m.normal_scale = 0.05
+			m.rim_enabled = true
+			m.rim = 0.2
+		"cylinder":  # painted metal tin
+			m.roughness = 0.32
+			m.metallic = 0.2
+			m.normal_scale = 0.08
+		"cone":      # matte moulded plastic
+			m.roughness = 0.6
+			m.normal_scale = 0.15
+	return m
 
 func _make_object(n: String, kind: String, color: Color, pos: Vector3) -> void:
 	var body := RigidBody3D.new()
@@ -157,7 +340,9 @@ func _make_object(n: String, kind: String, color: Color, pos: Vector3) -> void:
 	body.add_to_group("pickable")
 	start_transforms[body] = Transform3D(Basis(), pos)
 	var mesh := MeshInstance3D.new()
+	mesh.name = "Mesh"
 	var cs := CollisionShape3D.new()
+	var mat := _object_mat(color, kind)
 	match kind:
 		"cube":
 			var cube_mesh := BoxMesh.new()
@@ -170,6 +355,8 @@ func _make_object(n: String, kind: String, color: Color, pos: Vector3) -> void:
 			var sphere_mesh := SphereMesh.new()
 			sphere_mesh.radius = 0.15
 			sphere_mesh.height = 0.3
+			sphere_mesh.radial_segments = 48
+			sphere_mesh.rings = 24
 			mesh.mesh = sphere_mesh
 			var sphere_shape := SphereShape3D.new()
 			sphere_shape.radius = 0.15
@@ -179,6 +366,7 @@ func _make_object(n: String, kind: String, color: Color, pos: Vector3) -> void:
 			cylinder_mesh.top_radius = 0.15
 			cylinder_mesh.bottom_radius = 0.15
 			cylinder_mesh.height = 0.6
+			cylinder_mesh.radial_segments = 48
 			mesh.mesh = cylinder_mesh
 			var cylinder_shape := CylinderShape3D.new()
 			cylinder_shape.radius = 0.15
@@ -189,14 +377,29 @@ func _make_object(n: String, kind: String, color: Color, pos: Vector3) -> void:
 			cone_mesh.top_radius = 0.0
 			cone_mesh.bottom_radius = 0.15
 			cone_mesh.height = 0.3
+			cone_mesh.radial_segments = 48
 			mesh.mesh = cone_mesh
 			var cone_shape := CylinderShape3D.new()
 			cone_shape.radius = 0.15
 			cone_shape.height = 0.3
 			cs.shape = cone_shape
-	mesh.material_override = _mat(color)
+	mesh.material_override = mat
 	body.add_child(mesh)
 	body.add_child(cs)
+	if kind == "cylinder":
+		# Rolled rims top and bottom, like a real tin.
+		var rim_mat := _object_mat(color.darkened(0.3), kind)
+		for y: float in [-0.27, 0.27]:
+			var rim := MeshInstance3D.new()
+			var rim_mesh := CylinderMesh.new()
+			rim_mesh.top_radius = 0.156
+			rim_mesh.bottom_radius = 0.156
+			rim_mesh.height = 0.025
+			rim_mesh.radial_segments = 48
+			rim.mesh = rim_mesh
+			rim.material_override = rim_mat
+			rim.position.y = y
+			body.add_child(rim)
 	add_child(body)
 
 func _make_drop_zone() -> void:
@@ -211,10 +414,29 @@ func _make_drop_zone() -> void:
 	shape.size = Vector3(1.0, 0.2, 1.0)
 	cs.shape = shape
 	area.add_child(cs)
-	area.add_child(_box_mesh(Vector3(1, 0.015, 1), Color(1, 0, 0.85)))
+	# Rubber mat in the same colour as before, with a faint glow and a dark frame.
+	var mat := _mat(Color(1, 0, 0.85), 0.7)
+	mat.emission_enabled = true
+	mat.emission = Color(1, 0, 0.85)
+	mat.emission_energy_multiplier = 0.12
+	area.add_child(_box_mesh(Vector3(1, 0.015, 1), mat))
+	var frame := _mat(Color(0.16, 0.16, 0.18), 0.5)
+	for s: float in [-1.0, 1.0]:
+		var a := _box_mesh(Vector3(1.08, 0.02, 0.04), frame)
+		a.position = Vector3(0, 0, s * 0.52)
+		area.add_child(a)
+		var b := _box_mesh(Vector3(0.04, 0.02, 1.08), frame)
+		b.position = Vector3(s * 0.52, 0, 0)
+		area.add_child(b)
 	add_child(area)
 
 # ---------------- robot ----------------
+
+const RobotVisualScript := preload("res://scripts/robot_visual.gd")
+var visual: Node3D
+var last_robot_pos := Vector3.ZERO
+var last_heading := 0.0
+var robot_moving := false
 
 func _build_robot() -> void:
 	robot = CharacterBody3D.new()
@@ -232,15 +454,11 @@ func _build_robot() -> void:
 	body_cs.position.y = 0.38
 	robot.add_child(body_cs)
 
-	var visual := Node3D.new()
+	# Model and animation live in robot_visual.gd (render layer 2: hidden from Claude's camera).
+	visual = RobotVisualScript.new()
 	visual.name = "RobotVisual"
 	robot.add_child(visual)
-	_robot_box(visual, Vector3(0.62, 0.16, 0.56), Color(0.13, 0.13, 0.15), Vector3(0, 0.1, 0))
-	_robot_box(visual, Vector3(0.42, 0.3, 0.42), Color(0.93, 0.91, 0.86), Vector3(0, 0.34, 0))
-	_robot_box(visual, Vector3(0.34, 0.26, 0.4), Color(0.93, 0.91, 0.86), Vector3(0, 0.64, 0))
-	_robot_box(visual, Vector3(0.025, 0.18, 0.3), Color(0.95, 0.62, 0.22), Vector3(0.175, 0.64, 0))
-	for side in [-1.0, 1.0]:
-		_robot_box(visual, Vector3(0.3, 0.06, 0.06), Color(0.93, 0.91, 0.86), Vector3(0.2, 0.31, side * 0.25))
+	last_robot_pos = robot.global_position
 
 	pickup_point = Marker3D.new()
 	pickup_point.name = "PickupPoint"
@@ -261,12 +479,27 @@ func _build_robot() -> void:
 	pickup_area.add_child(pcs)
 	robot.add_child(pickup_area)
 
-func _robot_box(parent: Node3D, size: Vector3, color: Color, pos: Vector3) -> void:
-	var mi := _box_mesh(size, color)
-	mi.position = pos
-	mi.layers = 2 # Agent cameras cull layer 2 to avoid seeing the robot itself.
-	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	parent.add_child(mi)
+func _animate_robot(delta: float) -> void:
+	if delta <= 0.0 or visual == null:
+		return
+	var lin := (robot.global_position - last_robot_pos).dot(_forward()) / delta
+	var turn := wrapf(heading - last_heading, -180.0, 180.0) / delta
+	last_robot_pos = robot.global_position
+	last_heading = heading
+	if absf(lin) > 5.0 or absf(turn) > 720.0:   # teleport (reset), not motion
+		lin = 0.0
+		turn = 0.0
+	robot_moving = absf(lin) > 0.02 or absf(turn) > 2.0
+	var hold: Variant = null
+	if held != null and is_instance_valid(held):
+		hold = robot.to_local(held.global_position)
+	visual.animate(delta, lin, turn, state_name, hold)
+
+func _half_height(body: Node3D) -> float:
+	var mesh := body.get_node_or_null("Mesh") as MeshInstance3D
+	if mesh == null:
+		return 0.15
+	return mesh.get_aabb().size.y / 2.0
 
 func _forward() -> Vector3:
 	var a := deg_to_rad(heading)
@@ -275,13 +508,25 @@ func _forward() -> Vector3:
 func _sync_heading() -> void:
 	robot.rotation.y = -deg_to_rad(heading)
 
-# ---------------- cameras and operator interface ----------------
+# ---------------- cameras and on-screen display ----------------
+
+var chase_cam: Camera3D
+var cam_yaw := 0.0
+var cam_focus := Vector3.ZERO
+var cam_dist := 2.8
+var cam_pitch := 0.4            # radians above the horizon
+var orbit_yaw := 0.0
+var orbit_pitch := 0.0
+var dragging := false
+var cam_snap := true
+var view_mode := 0              # V key: 0 behind the robot, 1 in front (face), 2 high overview
 
 func _new_viewport(view_name: String, size: Vector2i, camera_name: String) -> Array:
 	var vp := SubViewport.new()
 	vp.name = view_name
 	vp.size = size
 	vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	vp.msaa_3d = Viewport.MSAA_4X
 	add_child(vp)
 	var cam := Camera3D.new()
 	cam.name = camera_name
@@ -292,25 +537,25 @@ func _new_viewport(view_name: String, size: Vector2i, camera_name: String) -> Ar
 	return [vp, cam]
 
 func _build_cameras() -> void:
-	var a := _new_viewport("OverviewViewport", PANEL_SIZE, "OverviewCamera")
-	overview_vp = a[0]
-	overview_cam = a[1]
 	var b := _new_viewport("AgentLookViewport", LOOK_SIZE, "AgentCamera")
 	look_vp = b[0]
 	look_cam = b[1]
-	var c := _new_viewport("PickupViewport", PANEL_SIZE, "PickupCamera")
-	pickup_vp = c[0]
-	pickup_cam = c[1]
+	look_cam.environment = agent_env
 	var d := _new_viewport("PovViewport", POV_SIZE, "PovCamera")
 	pov_vp = d[0]
 	pov_cam = d[1]
-	# Same 90-degree horizontal view as the agent camera (KEEP_WIDTH), at 720p for the clips.
-	# The subviewports share the main scene World3D. Update their cameras from robot pose.
-	overview_cam.position = Vector3(-7, 6, 7)
-	overview_cam.look_at(Vector3.ZERO)
+	# Same 90-degree horizontal view as the agent camera (KEEP_WIDTH), at 720p for the clips,
+	# with the main (tone-mapped) look. Rendered only while a run is being recorded.
+	pov_vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
 	look_cam.position = Vector3(0, 0.5, 0)
-	pickup_cam.position = Vector3(0.18, 1.05, 0)
-	pickup_cam.fov = 72.0
+	# Main window: a third-person chase camera, like in third-person games.
+	get_viewport().msaa_3d = Viewport.MSAA_4X
+	chase_cam = Camera3D.new()
+	chase_cam.name = "ChaseCamera"
+	chase_cam.fov = 62.0
+	chase_cam.near = 0.05
+	add_child(chase_cam)
+	chase_cam.current = true
 	_update_cameras()
 
 func _update_cameras() -> void:
@@ -320,69 +565,140 @@ func _update_cameras() -> void:
 	look_cam.global_position = robot.global_position + fwd * CAMERA_FORWARD + Vector3.UP * 0.5
 	look_cam.look_at(look_cam.global_position + fwd + Vector3.DOWN * 0.18, Vector3.UP)
 	pov_cam.global_transform = look_cam.global_transform
-	# Close, downward-angled view of the pickup point. Keep the camera just
-	# behind the robot's front so the target stays in frame as the robot approaches.
-	pickup_cam.global_position = robot.global_position + fwd * 0.18 + Vector3.UP * 1.05
-	pickup_cam.look_at(robot.global_position + fwd * 0.85 + Vector3.UP * 0.12, Vector3.UP)
-	pickup_cam.fov = 72.0
-	pickup_cam.cull_mask = 1 # Show arena and pickable objects; hide robot body meshes.
-	var target := robot.global_position
-	var overview_pos := target + Vector3(-6.5, 5.0, 6.5)
-	overview_cam.global_position = overview_cam.global_position.lerp(overview_pos, 0.08)
-	overview_cam.look_at(target, Vector3.UP)
+
+func _update_chase(delta: float) -> void:
+	if chase_cam == null or robot == null:
+		return
+	var fwd := _forward()
+	var target_yaw := atan2(fwd.z, fwd.x) + orbit_yaw + (PI if view_mode == 1 else 0.0)
+	var focus := robot.global_position + Vector3.UP * 0.5
+	if cam_snap:
+		cam_yaw = target_yaw
+		cam_focus = focus
+	# Smoothly swing in behind the robot and follow it, with a little lag.
+	cam_yaw = lerp_angle(cam_yaw, target_yaw, 1.0 - exp(-delta * 2.6))
+	cam_focus = cam_focus.lerp(focus, 1.0 - exp(-delta * 7.0))
+	var dir := Vector3(cos(cam_yaw), 0, sin(cam_yaw))
+	var base_p := clampf(cam_pitch + orbit_pitch + (0.75 if view_mode == 2 else 0.0), 0.08, 1.3)
+	var dist := cam_dist * (2.2 if view_mode == 2 else 1.0)
+	# Stay inside the room: if a wall is in the way, come closer and look down more steeply
+	# (like a third-person game camera in a tight corridor).
+	var want := _chase_point(dir, base_p, dist)
+	var free := _chase_free_distance(want)
+	if free < dist:
+		var squeeze := 1.0 - free / dist
+		var p2 := minf(base_p + squeeze * 0.8, 1.3)
+		want = _chase_point(dir, p2, dist)
+		free = _chase_free_distance(want)
+		if free < dist:
+			want = _chase_point(dir, p2, maxf(free - 0.2, 0.6))
+	if cam_snap:
+		chase_cam.global_position = want
+		cam_snap = false
+	else:
+		chase_cam.global_position = chase_cam.global_position.lerp(want, 1.0 - exp(-delta * 9.0))
+	chase_cam.look_at(cam_focus + dir * 0.7 + Vector3.DOWN * 0.1, Vector3.UP)
+	# Like most third-person games, the camera drifts back behind the robot once it moves.
+	if not dragging and robot_moving:
+		var back := 1.0 - exp(-delta * 1.2)
+		orbit_yaw = lerpf(orbit_yaw, 0.0, back)
+		orbit_pitch = lerpf(orbit_pitch, 0.0, back)
+
+func _chase_point(dir: Vector3, pitch: float, dist: float) -> Vector3:
+	return cam_focus - dir * dist * cos(pitch) + Vector3.UP * dist * sin(pitch)
+
+func _chase_free_distance(want: Vector3) -> float:
+	# How far the camera can go from the focus point toward `want` before hitting a wall.
+	var q := PhysicsRayQueryParameters3D.create(cam_focus, want)
+	q.collision_mask = 1
+	q.exclude = [robot.get_rid()]
+	var hit := get_world_3d().direct_space_state.intersect_ray(q)
+	if hit.is_empty():
+		return 100.0
+	var hit_pos: Vector3 = hit.position
+	return cam_focus.distance_to(hit_pos)
+
+func _unhandled_input(event: InputEvent) -> void:
+	# Mouse: drag to orbit the camera, wheel to zoom. (Hands off during judged runs.)
+	if event is InputEventMouseButton:
+		var mb := event as InputEventMouseButton
+		if mb.button_index == MOUSE_BUTTON_LEFT or mb.button_index == MOUSE_BUTTON_RIGHT:
+			dragging = mb.pressed
+		elif mb.pressed and mb.button_index == MOUSE_BUTTON_WHEEL_UP:
+			cam_dist = maxf(1.3, cam_dist * 0.9)
+		elif mb.pressed and mb.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+			cam_dist = minf(7.0, cam_dist * 1.1)
+	elif event is InputEventMouseMotion and dragging:
+		var mm := event as InputEventMouseMotion
+		orbit_yaw = wrapf(orbit_yaw + mm.relative.x * 0.006, -PI, PI)
+		orbit_pitch = clampf(orbit_pitch + mm.relative.y * 0.004, -0.3, 0.85)
+
+func _hud_box() -> StyleBoxFlat:
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.04, 0.05, 0.07, 0.62)
+	sb.set_corner_radius_all(10)
+	sb.content_margin_left = 14
+	sb.content_margin_right = 14
+	sb.content_margin_top = 8
+	sb.content_margin_bottom = 10
+	return sb
 
 func _build_ui() -> void:
 	var layer := CanvasLayer.new()
 	add_child(layer)
-	var panel := PanelContainer.new()
-	panel.position = Vector2(16, 12)
-	panel.size = Vector2(1260, 430)
-	layer.add_child(panel)
-	var column := VBoxContainer.new()
-	panel.add_child(column)
-	var header := HBoxContainer.new()
-	column.add_child(header)
-	var title := Label.new()
-	title.text = "MEMBRANE ROBOT  |  SIMULATION CONSOLE"
-	title.add_theme_font_size_override("font_size", 20)
-	header.add_child(title)
-	var spacer := Control.new()
-	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	header.add_child(spacer)
-	var online := Label.new()
-	online.text = "ENGINE ONLINE  |  HTTP :8080"
-	header.add_child(online)
-	var row := HBoxContainer.new()
-	column.add_child(row)
-	_add_view(row, "ROBOT POV (AGENT)", look_vp)
-	_add_view(row, "THIRD PERSON", overview_vp)
-	_add_view(row, "PICKUP POV", pickup_vp)
-	state_label = Label.new()
-	column.add_child(state_label)
-	var help := Label.new()
-	help.text = "W/S move 0.5m  |  A/D turn 30°  |  E pickup  |  Q drop  |  T throw  |  R reset  |  P save robot camera"
-	column.add_child(help)
-
-func _add_view(parent: HBoxContainer, label_text: String, vp: SubViewport) -> void:
+	# Status (top left)
+	var chip := PanelContainer.new()
+	chip.add_theme_stylebox_override("panel", _hud_box())
+	layer.add_child(chip)
 	var col := VBoxContainer.new()
-	col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	parent.add_child(col)
-	var label := Label.new()
-	label.text = label_text
-	col.add_child(label)
+	chip.add_child(col)
+	title_label = Label.new()
+	title_label.add_theme_font_size_override("font_size", 12)
+	title_label.modulate = Color(1, 1, 1, 0.6)
+	col.add_child(title_label)
+	state_label = Label.new()
+	state_label.add_theme_font_size_override("font_size", 18)
+	col.add_child(state_label)
+	chip.position = Vector2(16, 14)
+	# What the robot's own camera (and Claude) sees (top right)
+	var pip := PanelContainer.new()
+	pip.add_theme_stylebox_override("panel", _hud_box())
+	layer.add_child(pip)
+	var pcol := VBoxContainer.new()
+	pip.add_child(pcol)
+	var plabel := Label.new()
+	plabel.text = "ROBOT CAMERA"
+	plabel.add_theme_font_size_override("font_size", 12)
+	plabel.modulate = Color(1, 1, 1, 0.6)
+	pcol.add_child(plabel)
 	var rect := TextureRect.new()
-	rect.custom_minimum_size = PANEL_SIZE
-	rect.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	rect.custom_minimum_size = Vector2(320, 240)
 	rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT
-	rect.texture = vp.get_texture()
-	col.add_child(rect)
+	rect.texture = look_vp.get_texture()
+	pcol.add_child(rect)
+	pip.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT, Control.PRESET_MODE_MINSIZE, 16)
+	# Controls hint (bottom left)
+	var help := Label.new()
+	help.text = "Mouse drag: orbit  ·  Wheel: zoom  ·  V: camera view  ·  W/S move  ·  A/D turn  ·  E pickup  ·  Q drop  ·  T throw  ·  R reset  ·  P save camera"
+	help.add_theme_font_size_override("font_size", 12)
+	help.modulate = Color(1, 1, 1, 0.55)
+	layer.add_child(help)
+	help.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_LEFT, Control.PRESET_MODE_MINSIZE, 16)
 
 func _update_ui() -> void:
+	if title_label:
+		title_label.text = "ROBOT SIMULATOR  ·  API localhost:%d  ·  %d FPS" % [PORT, Engine.get_frames_per_second()]
 	if state_label:
-		state_label.text = "State: %s   Holding: %s   Retries: %d   Collision: %s" % [
-			state_name, str(held != null), retries, str(collided)
+		state_label.text = "%s     Holding: %s     Collisions: %d" % [
+			state_name, "yes" if held != null else "no", retries
 		]
+		var c := Color(0.75, 0.9, 1.0)
+		match state_name:
+			"Carry", "PickUp": c = Color(0.6, 1.0, 0.7)
+			"Blocked": c = Color(1.0, 0.7, 0.4)
+			"Done": c = Color(1.0, 1.0, 1.0)
+		state_label.modulate = c
 
 # ---------------- trail ----------------
 
@@ -390,6 +706,7 @@ func _build_trail() -> void:
 	trail_node = MeshInstance3D.new()
 	trail_node.name = "MovementTrail"
 	trail_node.top_level = true
+	trail_node.layers = 4   # third-person view only; Claude's camera and the clips cull it
 	add_child(trail_node)
 	_add_trail()
 
@@ -428,10 +745,14 @@ func _move(distance: float) -> Dictionary:
 	var remaining := absf(distance)
 	var moved := 0.0
 	var still_for := 0.0
-	while remaining > 0.001:
+	var elapsed := 0.0
+	while remaining > 0.000001:
 		await get_tree().physics_frame
 		var dt := get_physics_process_delta_time()
-		var step := minf(SPEED * dt, remaining)
+		elapsed += dt
+		# Cruise at SPEED (1 m/s) with short eased starts and stops; the distance is exact.
+		var ramp := clampf(minf(elapsed / RAMP_TIME, sqrt(2.0 * remaining / (SPEED * RAMP_TIME))), MIN_RAMP, 1.0)
+		var step := minf(SPEED * ramp * dt, remaining)
 		var before := robot.global_position
 		var hit := robot.move_and_collide(dir * step)
 		var progress := (robot.global_position - before).length()
@@ -445,7 +766,14 @@ func _move(distance: float) -> Dictionary:
 		_capture_frame()
 	if collided:
 		# Brief: stop, back off 0.1 m, report the collision, enter Blocked; fail after 3 retries.
-		robot.move_and_collide(-dir * BACK_OFF)
+		visual.bump()
+		var back := BACK_OFF
+		while back > 0.0005:
+			await get_tree().physics_frame
+			var s := minf(0.8 * get_physics_process_delta_time(), back)
+			robot.move_and_collide(-dir * s)
+			back -= s
+			_capture_frame()
 		moved = maxf(moved - BACK_OFF, 0.0)
 		retries += 1
 		trail_color = Color(1.0, 0.5, 0.05)
@@ -463,9 +791,14 @@ func _turn(degrees: float) -> Dictionary:
 	busy = true
 	var remaining := absf(degrees)
 	var sign_turn := signf(degrees)
-	while remaining > 0.01:
+	var elapsed := 0.0
+	while remaining > 0.000001:
 		await get_tree().physics_frame
-		var step := minf(TURN_SPEED * get_physics_process_delta_time(), remaining)
+		var dt := get_physics_process_delta_time()
+		elapsed += dt
+		# Cruise at TURN_SPEED (90 deg/s) with eased starts and stops; the angle is exact.
+		var ramp := clampf(minf(elapsed / RAMP_TIME, sqrt(2.0 * remaining / (TURN_SPEED * RAMP_TIME))), MIN_RAMP, 1.0)
+		var step := minf(TURN_SPEED * ramp * dt, remaining)
 		heading = fposmod(heading + sign_turn * step, 360.0)
 		remaining -= step
 		_sync_heading()
@@ -476,7 +809,7 @@ func _turn(degrees: float) -> Dictionary:
 	return {"turned": snappedf(degrees, 0.01)}
 
 func _pickup() -> Dictionary:
-	if held != null:
+	if held != null or busy:
 		return {"ok": false}
 	state_name = "PickUp"
 	var best: RigidBody3D = null
@@ -498,23 +831,41 @@ func _pickup() -> Dictionary:
 	if best == null:
 		state_name = "GoToObject"
 		return {"ok": false}
+	busy = true
 	held = best
 	held.freeze = true
 	held.linear_velocity = Vector3.ZERO
 	held.angular_velocity = Vector3.ZERO
-	held.reparent(robot, true)
-	var half_height := 0.15
-	for child in held.get_children():
-		if child is MeshInstance3D:
-			half_height = child.get_aabb().size.y / 2.0
-	held.global_position = pickup_point.global_position + Vector3.UP * half_height
-	held.global_rotation = robot.global_rotation
 	held.collision_layer = 0
 	held.collision_mask = 0
+	# 1) the arms reach out to the object, 2) it is lifted on a short arc to the carry point.
+	await _wait_physics(0.22)
+	held.reparent(robot, true)
+	var start := held.position
+	var start_rot := held.quaternion
+	var end := pickup_point.position + Vector3.UP * _half_height(held)
+	var t := 0.0
+	while t < 0.4:
+		await get_tree().physics_frame
+		t += get_physics_process_delta_time()
+		var k := smoothstep(0.0, 1.0, minf(t / 0.4, 1.0))
+		held.position = start.lerp(end, k) + Vector3.UP * sin(k * PI) * 0.12
+		held.quaternion = start_rot.slerp(Quaternion.IDENTITY, k)
+		_capture_frame()
+	held.position = end
+	held.quaternion = Quaternion.IDENTITY
+	busy = false
 	state_name = "Carry"
 	trail_color = Color(0.1, 0.85, 0.3)
 	_rebuild_trail()
 	return {"ok": true}
+
+func _wait_physics(seconds: float) -> void:
+	var waited := 0.0
+	while waited < seconds:
+		await get_tree().physics_frame
+		waited += get_physics_process_delta_time()
+		_capture_frame()
 
 func _drop() -> Dictionary:
 	if held == null or not is_instance_valid(held):
@@ -542,6 +893,7 @@ func _throw(distance: float) -> Dictionary:
 	if busy or held == null or not is_instance_valid(held):
 		return {"ok": false, "in_zone": false}
 	busy = true
+	visual.fling()
 	distance = clampf(distance, THROW_MIN, THROW_MAX)
 	var obj := held
 	var transform_before := obj.global_transform
@@ -601,6 +953,9 @@ func _reset() -> void:
 	robot.velocity = Vector3.ZERO
 	heading = 0.0
 	_sync_heading()
+	last_robot_pos = robot.global_position
+	last_heading = heading
+	cam_snap = true
 	retries = 0
 	collided = false
 	state_name = "Idle"
@@ -629,19 +984,26 @@ func _start_run(run_id: String) -> void:
 	capture_dir = ProjectSettings.globalize_path("res://").path_join("../runs/%s/pov" % run_id).simplify_path()
 	capture_frame = 0
 	capturing = DisplayServer.get_name() != "headless"
+	capture_accum = 1.0 / CLIP_FPS   # take a frame at the very first motion step
 	if capturing:
 		DirAccess.make_dir_recursive_absolute(capture_dir)
+		pov_vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
 
 func _end_run(result: String) -> void:
 	if state_name != "Done":
 		outcome = result
 	state_name = "Done"
 	capturing = false
+	pov_vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
 
 func _capture_frame() -> void:
-	# Physics runs at 60 Hz; keep every other frame for a 30 FPS clip.
-	if not capturing or Engine.get_physics_frames() % 2 != 0:
+	# Called every physics step while something moves; keep one frame per 1/CLIP_FPS s.
+	if not capturing:
 		return
+	capture_accum += get_physics_process_delta_time()
+	if capture_accum < 1.0 / CLIP_FPS:
+		return
+	capture_accum -= 1.0 / CLIP_FPS
 	var img := pov_vp.get_texture().get_image()
 	if img != null:
 		img.save_png(capture_dir.path_join("%05d.png" % capture_frame))
@@ -700,7 +1062,8 @@ func _serve_peer() -> void:
 			if state_name == "Done":
 				_send_json(200, {"success": false})
 			else:
-				_send_json(200, {"success": bool(_pickup()["ok"])})
+				var r := await _pickup()
+				_send_json(200, {"success": bool(r["ok"])})
 		"POST /drop":
 			if state_name == "Done":
 				_send_json(200, {"success": false, "in_zone": false})
