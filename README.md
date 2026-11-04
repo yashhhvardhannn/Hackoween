@@ -26,6 +26,7 @@ See [plan.md](plan.md) for roles, timeline, the API contract (§2) and the repo 
 
 ## Run
 1. Open `engine/` in Godot 4 and press **Play** (F5). The API starts on `localhost:8080`.
+   The window shows a third-person view: drag the mouse to orbit, scroll to zoom, press **V** to switch between behind / front / overhead views. The robot's own camera (what Claude sees) is in the top-right corner.
 2. In a terminal at the repo root, with the venv active:
    ```powershell
    python -m agent.agent "Bring the yellow cone" --mode claude --reset

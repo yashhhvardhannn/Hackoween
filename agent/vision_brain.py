@@ -118,6 +118,8 @@ def find_blobs(image_bytes: bytes):
             bw, bh = right - left, bottom - top
             fill = len(pts) * 4 / max(bw * bh, 1)
             dist = ground_distance(bottom)
+            if dist >= 99.0:
+                continue   # sits entirely above the horizon: sky, not an object on the floor
             blobs.append({
                 "colour": colour,
                 "shape": _shape(fill, bh / max(bw, 1)) if colour != "zone" else "zone",
