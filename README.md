@@ -27,6 +27,7 @@ See [plan.md](plan.md) for roles, timeline, the API contract (§2) and the repo 
 ## Run
 1. Open `engine/` in Godot 4 and press **Play** (F5). The API starts on `localhost:8080`.
    The window shows a third-person view: drag the mouse to orbit, scroll to zoom, press **V** to switch between behind / front / overhead views. The robot's own camera (what Claude sees) is in the top-right corner.
+   Launch options (after `--`): `--view=front|behind|overview`, `--port=8081` (a second engine; point the agent at it with `ENGINE_URL=http://localhost:8081` in `.env`).
 2. In a terminal at the repo root, with the venv active:
    ```powershell
    python -m agent.agent "Bring the yellow cone" --mode claude --reset
@@ -39,4 +40,4 @@ See [plan.md](plan.md) for roles, timeline, the API contract (§2) and the repo 
 Nobody may touch the keyboard or mouse during a judged run.
 
 ## Robot actions (Claude's tools)
-`move(distance)` −1.5…1.5 m · `turn(degrees)` −180…180 (positive = right) · `pickup()` reach 0.5 m, ±30° · `drop()` reports `in_zone` · `throw(distance)` 0.5…4 m, reports `in_zone` · `give_up(reason)`. A collision stops the robot, backs it off 0.1 m and enters Blocked; the 4th collision fails the run.
+`move(distance)` −3…3 m · `turn(degrees)` −180…180 (positive = right) · `pickup()` reach 0.5 m, ±30° · `drop()` reports `in_zone` · `throw(distance)` 0.5…4 m, reports `in_zone` · `give_up(reason)`. A collision stops the robot, backs it off 0.1 m and enters Blocked; the 4th collision fails the run.

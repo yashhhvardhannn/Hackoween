@@ -32,7 +32,7 @@ ROBOT_TOOLS = [
     },
     {
         "name": "move",
-        "description": "Move the robot in metres: positive = forward, negative = backward. Allowed range -1.5 to 1.5 per step.",
+        "description": "Move the robot in metres: positive = forward, negative = backward. Allowed range -3 to 3 per step. Prefer one long move over several short ones when the path is clear.",
         "input_schema": {
             "type": "object",
             "properties": {

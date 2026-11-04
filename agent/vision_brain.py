@@ -30,7 +30,7 @@ CAM_TILT = math.atan(0.18)            # engine aims the camera 0.18 m down per m
 AIM_TOLERANCE = 6.0                   # turn first if the target is further off-centre than this
 PICKUP_STANDOFF = 0.22                # stop when the object's near edge is this far from the camera
 DROP_OFFSET = 0.62                    # carried object sits this far ahead of the camera
-MAX_MOVE = 1.5                        # agent validation limit
+MAX_MOVE = 1.5                        # this stand-in keeps to short moves (agent allows up to 3 m)
 SEARCH_TURN = 45.0
 BOTTOM_CUT = 470                      # blob bottom at/after this row = cut off by the image edge
 

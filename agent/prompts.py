@@ -128,7 +128,7 @@ APPROACH STRATEGY (aim for 2-3 actions):
 1. Turn once so the target is roughly centred.
 2. If the strip to it is clear, move (distance to
    the object's base - 0.3 m) in ONE move (up to
-   1.5 m per move). Do not stop half way to look.
+   3 m per move). Do not stop half way to look.
 3. Pickup reaches 0.5 m from the robot's front to
    the object's CENTRE. Call pickup when the object's
    base is cut off by the bottom edge of the image and
@@ -147,8 +147,8 @@ After successful pickup:
    driving, note every object you saw near the route
    (including ones partly hidden behind the held
    object) and steer so they are outside the guide
-   lines. Use full 1.5 m moves when the strip is
-   clear.
+   lines. When the strip is clear, cover the whole
+   distance in one move (up to 3 m).
    If you saw the drop zone during the search, turn
    straight towards it using that memory instead of
    scanning again.
@@ -182,8 +182,11 @@ If a movement reports collided = true:
 EFFICIENCY:
 - Prefer purposeful movements.
 - Avoid unnecessary full-room rescanning.
-- Use larger movements when far from obstacles.
-- Use smaller movements when close to objects.
+- The robot stops while you decide, so every extra
+  action is a visible pause. Prefer ONE long move
+  (up to 3 m) over several short ones whenever the
+  strip between the guide lines is clear that far.
+- Use smaller movements only when close to objects.
 - Aim to complete tasks within 10 tool actions.
   Every action costs about 4 seconds, so each extra
   small correction makes the run slower.

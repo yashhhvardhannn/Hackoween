@@ -6,6 +6,7 @@ import requests
 
 BASE_URL = os.getenv("ENGINE_URL", "http://localhost:8080")
 _RETRY_DELAY_SECONDS = 0.25
+MAX_MOVE = 3.0   # metres per move; long clear moves mean fewer stops (the guide ticks go to 3 m)
 
 
 def _request(method, path, **kwargs):
@@ -101,10 +102,10 @@ def validate_action(name, args):
         if (
             isinstance(distance, bool)
             or not isinstance(distance, (int, float))
-            or not -1.5 <= distance <= 1.5
+            or not -MAX_MOVE <= distance <= MAX_MOVE
         ):
             raise ValueError(
-                "Move distance must be between -1.5 and 1.5 metres"
+                f"Move distance must be between -{MAX_MOVE:g} and {MAX_MOVE:g} metres"
             )
 
     elif name == "turn":
