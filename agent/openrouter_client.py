@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import time
 
 import requests
 
@@ -28,6 +29,7 @@ from tools.leak_check import check_request
 
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-v4.1-flash")
+MAX_ATTEMPTS = 3
 
 # Same tools as the Claude client, in OpenAI/OpenRouter "function" format.
 OPENAI_TOOLS = [
@@ -82,28 +84,45 @@ class OpenRouterRobotClient:
 
         body = {
             "model": MODEL,
-            "max_tokens": 500,
+            # Room for models that "think" before answering; too small a limit gives empty replies.
+            "max_tokens": 2000,
             "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + self.history,
             "tools": OPENAI_TOOLS,
             "tool_choice": "required",
             "parallel_tool_calls": False,
         }
-        response = requests.post(
-            API_URL,
-            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json",
-                     "X-Title": "Hackoween robot agent"},
-            json=body,
-            timeout=120,
-        )
-        if response.status_code != 200:
+        # Free/cheap models sometimes return an empty reply or hit a rate limit: retry a few times.
+        last_problem = ""
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            response = requests.post(
+                API_URL,
+                headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json",
+                         "X-Title": "Hackoween robot agent"},
+                json=body,
+                timeout=120,
+            )
+            if response.status_code != 200:
+                last_problem = f"OpenRouter error {response.status_code}: {response.text[:300]}"
+                if response.status_code in (429, 500, 502, 503) and attempt < MAX_ATTEMPTS:
+                    print(f"  ({last_problem[:80]}... retrying {attempt}/{MAX_ATTEMPTS - 1})")
+                    time.sleep(2 * attempt)
+                    continue
+                break
+            data = response.json()
+            choice = (data.get("choices") or [{}])[0]
+            message = choice.get("message") or {}
+            calls = [c for c in (message.get("tool_calls") or []) if c["function"]["name"] in TOOL_NAMES]
+            if calls:
+                break
+            last_problem = (f"Model did not choose a robot action (finish_reason={choice.get('finish_reason')}). "
+                            f"It said: {str(message.get('content'))[:200]}")
+            if attempt < MAX_ATTEMPTS:
+                print(f"  (empty reply from the model, retrying {attempt}/{MAX_ATTEMPTS - 1})")
+        else:
+            calls = []
+        if response.status_code != 200 or not calls:
             self.history.pop()
-            raise RuntimeError(f"OpenRouter error {response.status_code}: {response.text[:300]}")
-        data = response.json()
-        message = data["choices"][0]["message"]
-        calls = [c for c in (message.get("tool_calls") or []) if c["function"]["name"] in TOOL_NAMES]
-        if not calls:
-            self.history.pop()
-            raise RuntimeError(f"Model did not choose a robot action. It said: {str(message.get('content'))[:300]}")
+            raise RuntimeError(last_problem)
         call = calls[0]                       # exactly one action per step
         try:
             arguments = json.loads(call["function"]["arguments"] or "{}")

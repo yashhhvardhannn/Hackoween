@@ -17,7 +17,7 @@ MODEL = os.getenv(
 ROBOT_TOOLS = [
     {
         "name": "turn",
-        "description": "Rotate the robot in degrees.",
+        "description": "Rotate the robot in degrees: positive = right, negative = left. Allowed range -180 to 180.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -32,7 +32,7 @@ ROBOT_TOOLS = [
     },
     {
         "name": "move",
-        "description": "Move the robot in metres.",
+        "description": "Move the robot in metres: positive = forward, negative = backward. Allowed range -1.5 to 1.5 per step.",
         "input_schema": {
             "type": "object",
             "properties": {
