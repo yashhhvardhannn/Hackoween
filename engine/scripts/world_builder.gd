@@ -19,9 +19,10 @@ const THROW_MIN := 0.5         # /throw distance range in metres
 const THROW_MAX := 4.0
 const THROW_SETTLE_MAX := 4.0  # seconds to wait for a thrown object to stop
 const LOOK_SIZE := Vector2i(640, 480)
-const RAMP_TIME := 0.25       # seconds to reach full speed / to stop (smooth starts and stops)
+const RAMP_TIME := 0.15       # seconds to reach full speed / to stop (smooth starts and stops)
 const MIN_RAMP := 0.15
 const CLIP_FPS := 30.0
+const TARGET_FPS := 60
 
 var robot: CharacterBody3D
 var pickup_area: Area3D
@@ -44,6 +45,9 @@ var capture_dir := ""
 var capture_frame := 0
 var look_cam: Camera3D
 var capture_accum := 0.0
+var run_frames := 0
+var run_render_time := 0.0
+var run_slow_frames := 0
 
 var trail_points: Array[Vector3] = []
 var start_transforms := {}     # pickable body -> starting transform, for /reset
@@ -57,10 +61,11 @@ var state_label: Label
 var title_label: Label
 
 func _ready() -> void:
-	# Run physics at the screen's refresh rate (60-144 Hz) so motion is smooth on any display.
-	# Speeds use the frame time, and clip frames are taken by time (CLIP_FPS), so nothing else changes.
-	var hz := roundi(DisplayServer.screen_get_refresh_rate())
-	Engine.physics_ticks_per_second = clampi(hz, 60, 144) if hz > 0 else 60
+	# Steady 60 FPS on every laptop: physics at 60 Hz and rendering capped at 60,
+	# so each drawn frame shows exactly one physics step (smooth, no jumps on 120/144 Hz screens).
+	Engine.physics_ticks_per_second = TARGET_FPS
+	Engine.max_fps = TARGET_FPS
+	Engine.max_physics_steps_per_frame = 2
 	# Optional start view: godot --path engine -- --view=front   (behind | front | overview)
 	for arg in OS.get_cmdline_user_args():
 		if arg.begins_with("--view="):
@@ -78,6 +83,11 @@ func _ready() -> void:
 	print("Keys: W/S move, A/D turn, E pickup, Q drop, T throw, R reset, P save /look")
 
 func _process(delta: float) -> void:
+	if capturing:
+		run_frames += 1
+		run_render_time += delta
+		if delta > 1.0 / 50.0:
+			run_slow_frames += 1
 	_update_cameras()
 	_animate_robot(delta)
 	_update_chase(delta)
@@ -102,11 +112,14 @@ func _unhandled_key_input(event: InputEvent) -> void:
 # ---------------- world ----------------
 
 const WALL_HEIGHT := 2.0
+const LAYER_AGENT := 8         # render layer 4: seen only by Claude's camera
+const LAYER_PEOPLE := 16       # render layer 5: seen only by the third-person view and the clips
 const AGENT_EXPOSURE := 0.78   # keeps the floor in Claude's view mid-bright, not clipped white
 const FLOOR_SHADER := """
 shader_type spatial;
 uniform vec3 tint : source_color = vec3(0.72, 0.72, 0.72);
 uniform float tile = 1.0;
+uniform float grout_strength = 1.0;   // 0 = plain floor (the version Claude's camera sees)
 varying vec3 wp;
 float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 float noise(vec2 p) {
@@ -127,10 +140,10 @@ void fragment() {
 	// Polished concrete tiles: soft mottling, slight per-tile shade, thin grout lines.
 	vec2 p = wp.xz / tile;
 	vec2 g = abs(fract(p) - 0.5);
-	float grout = smoothstep(0.488, 0.497, max(g.x, g.y));
+	float grout = smoothstep(0.488, 0.497, max(g.x, g.y)) * grout_strength;
 	float fine = fbm(wp.xz * 4.0);
 	float broad = fbm(wp.xz * 0.5 + 11.0);
-	float per_tile = hash(floor(p) + 3.0) * 0.05;
+	float per_tile = hash(floor(p) + 3.0) * 0.05 * grout_strength;
 	vec3 col = tint * (0.9 + 0.1 * fine + 0.08 * broad - per_tile);
 	col = mix(col, tint * 0.6, grout * 0.7);
 	ALBEDO = col;
@@ -174,13 +187,14 @@ func _visual_box(size: Vector3, pos: Vector3, mat: Material) -> void:
 	mi.position = pos
 	add_child(mi)
 
-func _floor_mat(tint: Color, tile: float) -> ShaderMaterial:
+func _floor_mat(tint: Color, tile: float, grout := 1.0) -> ShaderMaterial:
 	var sh := Shader.new()
 	sh.code = FLOOR_SHADER
 	var m := ShaderMaterial.new()
 	m.shader = sh
 	m.set_shader_parameter("tint", Vector3(tint.r, tint.g, tint.b))
 	m.set_shader_parameter("tile", tile)
+	m.set_shader_parameter("grout_strength", grout)
 	return m
 
 func _make_detail_normal() -> NoiseTexture2D:
@@ -236,6 +250,9 @@ func _build_world() -> void:
 	agent_env.tonemap_exposure = AGENT_EXPOSURE
 	agent_env.glow_enabled = false
 	agent_env.adjustment_enabled = false
+	# Pale plain background for Claude, as before (a deep-blue sky reads like a blue object).
+	agent_env.background_mode = Environment.BG_COLOR
+	agent_env.background_color = Color(0.75, 0.85, 0.95)
 	if RenderingServer.get_current_rendering_method() == "forward_plus":
 		# Extra polish only available on the Forward+ renderer (main view and clips only).
 		main_env.ssao_enabled = true
@@ -264,6 +281,14 @@ func _build_world() -> void:
 
 	# Room: tiled concrete floor, plaster walls with a dark skirting board and a cap.
 	_static_box("Floor", Vector3(8, 0.1, 8), Vector3(0, -0.05, 0), _floor_mat(Color(0.62, 0.61, 0.59), 1.0))
+	# Two looks for the same floor: tiled for people (third-person view, clips: layer 5) and
+	# plain for Claude's camera (layer 4), so tile lines can't be mistaken for edges or paths.
+	var floor_tiled := get_node("Floor").get_child(1) as MeshInstance3D
+	floor_tiled.layers = LAYER_PEOPLE
+	var floor_plain := _box_mesh(Vector3(8, 0.1, 8), _floor_mat(Color(0.62, 0.61, 0.59), 1.0, 0.0))
+	floor_plain.position = Vector3(0, -0.05, 0)
+	floor_plain.layers = LAYER_AGENT
+	add_child(floor_plain)
 	var plaster := _mat(Color(0.8, 0.79, 0.76), 0.92)
 	plaster.normal_enabled = true
 	plaster.normal_texture = detail_normal
@@ -541,12 +566,14 @@ func _build_cameras() -> void:
 	look_vp = b[0]
 	look_cam = b[1]
 	look_cam.environment = agent_env
+	look_cam.cull_mask = 1 | LAYER_AGENT
 	var d := _new_viewport("PovViewport", POV_SIZE, "PovCamera")
 	pov_vp = d[0]
 	pov_cam = d[1]
 	# Same 90-degree horizontal view as the agent camera (KEEP_WIDTH), at 720p for the clips,
 	# with the main (tone-mapped) look. Rendered only while a run is being recorded.
 	pov_vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
+	pov_cam.cull_mask = 1 | LAYER_PEOPLE
 	look_cam.position = Vector3(0, 0.5, 0)
 	# Main window: a third-person chase camera, like in third-person games.
 	get_viewport().msaa_3d = Viewport.MSAA_4X
@@ -554,6 +581,7 @@ func _build_cameras() -> void:
 	chase_cam.name = "ChaseCamera"
 	chase_cam.fov = 62.0
 	chase_cam.near = 0.05
+	chase_cam.cull_mask = 0xFFFFF & ~LAYER_AGENT
 	add_child(chase_cam)
 	chase_cam.current = true
 	_update_cameras()
@@ -839,16 +867,16 @@ func _pickup() -> Dictionary:
 	held.collision_layer = 0
 	held.collision_mask = 0
 	# 1) the arms reach out to the object, 2) it is lifted on a short arc to the carry point.
-	await _wait_physics(0.22)
+	await _wait_physics(0.15)
 	held.reparent(robot, true)
 	var start := held.position
 	var start_rot := held.quaternion
 	var end := pickup_point.position + Vector3.UP * _half_height(held)
 	var t := 0.0
-	while t < 0.4:
+	while t < 0.3:
 		await get_tree().physics_frame
 		t += get_physics_process_delta_time()
-		var k := smoothstep(0.0, 1.0, minf(t / 0.4, 1.0))
+		var k := smoothstep(0.0, 1.0, minf(t / 0.3, 1.0))
 		held.position = start.lerp(end, k) + Vector3.UP * sin(k * PI) * 0.12
 		held.quaternion = start_rot.slerp(Quaternion.IDENTITY, k)
 		_capture_frame()
@@ -985,6 +1013,9 @@ func _start_run(run_id: String) -> void:
 	capture_frame = 0
 	capturing = DisplayServer.get_name() != "headless"
 	capture_accum = 1.0 / CLIP_FPS   # take a frame at the very first motion step
+	run_frames = 0
+	run_render_time = 0.0
+	run_slow_frames = 0
 	if capturing:
 		DirAccess.make_dir_recursive_absolute(capture_dir)
 		pov_vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
@@ -993,6 +1024,9 @@ func _end_run(result: String) -> void:
 	if state_name != "Done":
 		outcome = result
 	state_name = "Done"
+	if capturing and run_render_time > 0.0:
+		print("Run finished: %s, average %.0f FPS, %d slow frames (under 50 FPS)" % [
+			outcome, run_frames / run_render_time, run_slow_frames])
 	capturing = false
 	pov_vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
 
@@ -1006,7 +1040,9 @@ func _capture_frame() -> void:
 	capture_accum -= 1.0 / CLIP_FPS
 	var img := pov_vp.get_texture().get_image()
 	if img != null:
-		img.save_png(capture_dir.path_join("%05d.png" % capture_frame))
+		# PNG encoding of a 720p frame takes tens of ms; doing it here would drop frames.
+		var path := capture_dir.path_join("%05d.png" % capture_frame)
+		WorkerThreadPool.add_task(func() -> void: img.save_png(path))
 		capture_frame += 1
 
 # ---------------- HTTP server (plan.md section 2) ----------------
