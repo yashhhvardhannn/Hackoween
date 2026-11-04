@@ -31,6 +31,30 @@ func _ready() -> void:
 		push_error("ApiServer: cannot listen on port %d (error %d). Is the mock engine still running?" % [PORT, err])
 		return
 	print("ApiServer listening on http://localhost:%d" % PORT)
+	# The robot is in the main scene, which loads after autoloads. Check it once things settle.
+	get_tree().create_timer(1.0).timeout.connect(_check_robot)
+
+
+## Startup self-check: tells Yash right away if the robot is missing or lacks a function.
+const ROBOT_FUNCTIONS := [
+	"do_move", "do_turn", "do_pickup", "do_drop", "get_pose",
+	"get_look_jpeg", "get_depth", "start_capture", "stop_capture",
+]
+
+
+func _check_robot() -> void:
+	var robot = get_tree().get_first_node_in_group("robot")
+	if robot == null:
+		push_error("ApiServer: no node in group \"robot\". Add the robot node to group \"robot\" (Node tab > Groups).")
+		return
+	var missing: Array[String] = []
+	for f in ROBOT_FUNCTIONS:
+		if not robot.has_method(f):
+			missing.append(f)
+	if missing.is_empty():
+		print("ApiServer: robot '%s' found, all %d functions present. Ready." % [robot.name, ROBOT_FUNCTIONS.size()])
+	else:
+		push_error("ApiServer: robot '%s' is missing: %s (see engine/scripts/api/README.md)" % [robot.name, ", ".join(PackedStringArray(missing))])
 
 
 func _process(_delta: float) -> void:
@@ -127,7 +151,7 @@ func _route(method: String, path: String, body_text: String) -> Array:
 				"state": StateMachine.state,
 				"x": snappedf(float(pose.get("x", 0.0)), 0.001),
 				"y": snappedf(float(pose.get("y", 0.0)), 0.001),
-				"heading": snappedf(float(pose.get("heading", 0.0)), 0.01),
+				"heading": fposmod(snappedf(float(pose.get("heading", 0.0)), 0.01), 360.0),  # always 0 <= h < 360
 				"holding": bool(pose.get("holding", false)),
 				"retries": int(StateMachine.retries),
 			})
@@ -147,7 +171,7 @@ func _route(method: String, path: String, body_text: String) -> Array:
 			if _motion_busy:
 				return _json(409, {"error": "robot is busy"})
 			_motion_busy = true
-			var r: Dictionary = await robot.do_move(float(body["distance"]))
+			var r := _dict(await robot.do_move(float(body["distance"])))
 			_motion_busy = false
 			var collided := bool(r.get("collided", false))
 			StateMachine.on_move(collided, _holding(robot))
@@ -165,7 +189,7 @@ func _route(method: String, path: String, body_text: String) -> Array:
 			if _motion_busy:
 				return _json(409, {"error": "robot is busy"})
 			_motion_busy = true
-			var r: Dictionary = await robot.do_turn(float(body["degrees"]))
+			var r := _dict(await robot.do_turn(float(body["degrees"])))
 			_motion_busy = false
 			StateMachine.on_turn(_holding(robot))
 			return _json(200, {
@@ -184,7 +208,7 @@ func _route(method: String, path: String, body_text: String) -> Array:
 		"POST /drop":
 			if StateMachine.is_done():
 				return _json(200, {"success": false, "in_zone": false})
-			var r: Dictionary = robot.do_drop()
+			var r := _dict(robot.do_drop())
 			var success := bool(r.get("success", false))
 			var in_zone := success and bool(r.get("in_zone", false))
 			if success:
@@ -210,6 +234,11 @@ func _route(method: String, path: String, body_text: String) -> Array:
 			return _json(200, {"ok": true})
 
 	return _json(404, {"error": "unknown endpoint"})
+
+
+## If robot code crashes it returns null; treat that as an empty result instead of crashing here.
+func _dict(v: Variant) -> Dictionary:
+	return v if typeof(v) == TYPE_DICTIONARY else {}
 
 
 func _holding(robot) -> bool:

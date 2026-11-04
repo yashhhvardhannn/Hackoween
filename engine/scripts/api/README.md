@@ -5,6 +5,10 @@
 | `api_server.gd` | Autoload `ApiServer`. HTTP server on port 8080 that answers plan.md §2. Builds every reply from an explicit key list, so no object data can leak. |
 | `state_machine.gd` | Autoload `StateMachine`. Tracks Idle → Locate → GoToObject → PickUp → Carry → Drop → Done, plus Blocked. Ends the run with `fail_collision` after the 4th collision (3 retries). |
 | `fake_robot.gd` | Stand-in robot for testing without the real scene. **Not registered in the real game.** |
+| `robot_template.gd` | Starting point for Yash's `robot.gd`: every required function, tested with real 3D physics. Copy it, don't attach it from here. |
+| `CONNECTING.md` | **Step-by-step: plug Yash's robot into the API and connect from other laptops.** |
+
+On startup `ApiServer` checks the robot and prints either `all 9 functions present. Ready.` or exactly which functions are missing.
 
 ## What the real robot must provide (Yash)
 
