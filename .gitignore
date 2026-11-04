@@ -1,0 +1,17 @@
+# secrets
+.env
+
+# python
+__pycache__/
+*.pyc
+.venv/
+
+# godot cache (do commit *.import and *.uid)
+engine/.godot/
+
+# run outputs: only runs/final is committed
+runs/*
+!runs/final/
+
+# clips
+*.mp4
