@@ -36,6 +36,11 @@ var outcome := ""              # pass | fail_collision | fail_not_reached | fail
 var retries := 0
 var collided := false
 var busy := false
+var port := PORT                # --port=8081 runs a second engine next to one already on 8080
+# Last motion ("f"/"b" move, "l"/"r" turn). A follow-up in the same direction continues at full
+# speed, so back-to-back steps play as one smooth drive in the clip (the engine clock is frozen
+# while the AI thinks, so in engine time the next step starts right where the last one ended).
+var last_motion := ""
 
 var look_vp: SubViewport
 var pov_vp: SubViewport        # 1280x720 copy of the robot camera, for clip frames
@@ -70,16 +75,18 @@ func _ready() -> void:
 	for arg in OS.get_cmdline_user_args():
 		if arg.begins_with("--view="):
 			view_mode = maxi(0, ["behind", "front", "overview"].find(arg.get_slice("=", 1)))
+		elif arg.begins_with("--port="):
+			port = int(arg.get_slice("=", 1))
 	_build_world()
 	_build_robot()
 	_build_cameras()
 	_build_trail()
 	_build_ui()
-	var err := server.listen(PORT, "*")  # "*" so other laptops on the Wi-Fi can connect
+	var err := server.listen(port, "*")  # "*" so other laptops on the Wi-Fi can connect
 	if err == OK:
-		print("Robot HTTP API: http://localhost:%d" % PORT)
+		print("Robot HTTP API: http://localhost:%d" % port)
 	else:
-		push_error("Could not listen on port %d. Error %d" % [PORT, err])
+		push_error("Could not listen on port %d. Error %d" % [port, err])
 	print("Keys: W/S move, A/D turn, E pickup, Q drop, T throw, R reset, P save /look")
 
 func _process(delta: float) -> void:
@@ -716,7 +723,7 @@ func _build_ui() -> void:
 
 func _update_ui() -> void:
 	if title_label:
-		title_label.text = "ROBOT SIMULATOR  ·  API localhost:%d  ·  %d FPS" % [PORT, Engine.get_frames_per_second()]
+		title_label.text = "ROBOT SIMULATOR  ·  API localhost:%d  ·  %d FPS" % [port, Engine.get_frames_per_second()]
 	if state_label:
 		state_label.text = "%s     Holding: %s     Collisions: %d" % [
 			state_name, "yes" if held != null else "no", retries
@@ -773,13 +780,15 @@ func _move(distance: float) -> Dictionary:
 	var remaining := absf(distance)
 	var moved := 0.0
 	var still_for := 0.0
-	var elapsed := 0.0
+	var kind := "f" if distance > 0.0 else "b"
+	var elapsed := RAMP_TIME if last_motion == kind else 0.0
 	while remaining > 0.000001:
 		await get_tree().physics_frame
 		var dt := get_physics_process_delta_time()
 		elapsed += dt
-		# Cruise at SPEED (1 m/s) with short eased starts and stops; the distance is exact.
-		var ramp := clampf(minf(elapsed / RAMP_TIME, sqrt(2.0 * remaining / (SPEED * RAMP_TIME))), MIN_RAMP, 1.0)
+		# Cruise at SPEED (1 m/s); ease in from a standstill, carry on at full speed when this
+		# continues the previous move. No braking at the end, so a next move flows on. Distance is exact.
+		var ramp := clampf(elapsed / RAMP_TIME, MIN_RAMP, 1.0)
 		var step := minf(SPEED * ramp * dt, remaining)
 		var before := robot.global_position
 		var hit := robot.move_and_collide(dir * step)
@@ -810,6 +819,7 @@ func _move(distance: float) -> Dictionary:
 			_end_run("fail_collision")
 		else:
 			state_name = "Blocked"
+	last_motion = "" if collided else kind
 	busy = false
 	return {"moved": snappedf(moved * signf(distance), 0.001), "collided": collided}
 
@@ -819,13 +829,14 @@ func _turn(degrees: float) -> Dictionary:
 	busy = true
 	var remaining := absf(degrees)
 	var sign_turn := signf(degrees)
-	var elapsed := 0.0
+	var kind := "r" if degrees > 0.0 else "l"
+	var elapsed := RAMP_TIME if last_motion == kind else 0.0
 	while remaining > 0.000001:
 		await get_tree().physics_frame
 		var dt := get_physics_process_delta_time()
 		elapsed += dt
-		# Cruise at TURN_SPEED (90 deg/s) with eased starts and stops; the angle is exact.
-		var ramp := clampf(minf(elapsed / RAMP_TIME, sqrt(2.0 * remaining / (TURN_SPEED * RAMP_TIME))), MIN_RAMP, 1.0)
+		# Cruise at TURN_SPEED (90 deg/s); same easing rule as moves. The angle is exact.
+		var ramp := clampf(elapsed / RAMP_TIME, MIN_RAMP, 1.0)
 		var step := minf(TURN_SPEED * ramp * dt, remaining)
 		heading = fposmod(heading + sign_turn * step, 360.0)
 		remaining -= step
@@ -833,10 +844,12 @@ func _turn(degrees: float) -> Dictionary:
 		_capture_frame()
 	if state_name != "Done":
 		state_name = "Carry" if held != null else "Locate"
+	last_motion = kind
 	busy = false
 	return {"turned": snappedf(degrees, 0.01)}
 
 func _pickup() -> Dictionary:
+	last_motion = ""
 	if held != null or busy:
 		return {"ok": false}
 	state_name = "PickUp"
@@ -896,6 +909,7 @@ func _wait_physics(seconds: float) -> void:
 		_capture_frame()
 
 func _drop() -> Dictionary:
+	last_motion = ""
 	if held == null or not is_instance_valid(held):
 		return {"ok": false, "in_zone": false}
 	var obj := held
@@ -916,6 +930,7 @@ func _drop() -> Dictionary:
 	return {"ok": true, "in_zone": inside}
 
 func _throw(distance: float) -> Dictionary:
+	last_motion = ""
 	# Lob the held object forward so it lands about `distance` metres ahead of where it is held.
 	# 45-degree launch: range = v^2 / g, so v = sqrt(distance * g). It may bounce or roll a little.
 	if busy or held == null or not is_instance_valid(held):
@@ -965,6 +980,7 @@ func _throw(distance: float) -> Dictionary:
 	return {"ok": true, "in_zone": inside}
 
 func _reset() -> void:
+	last_motion = ""
 	# Put everything back where it started, without reloading the scene
 	# (reloading would briefly stop the HTTP server and drop requests).
 	if held != null and is_instance_valid(held):
@@ -1003,6 +1019,7 @@ func _save_look() -> void:
 # ---------------- run lifecycle and clip frames ----------------
 
 func _start_run(run_id: String) -> void:
+	last_motion = ""
 	retries = 0
 	collided = false
 	outcome = ""
