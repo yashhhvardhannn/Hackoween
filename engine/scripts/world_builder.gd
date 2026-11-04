@@ -15,6 +15,9 @@ const STUCK_SECONDS := 2.0     # brief: no movement for 2 s counts as blocked
 const MAX_RETRIES := 3         # brief: fail after 3 retries
 const POV_SIZE := Vector2i(1280, 720)  # Phase 2 clips: 720p
 const DROP_ZONE_CENTER := Vector3(-2.5, 0, 2.5)
+const THROW_MIN := 0.5         # /throw distance range in metres
+const THROW_MAX := 4.0
+const THROW_SETTLE_MAX := 4.0  # seconds to wait for a thrown object to stop
 const LOOK_SIZE := Vector2i(640, 480)
 const PANEL_SIZE := Vector2i(400, 260)
 
@@ -533,9 +536,13 @@ func _drop() -> Dictionary:
 		_end_run("pass")
 	return {"ok": true, "in_zone": inside}
 
-func _throw(power: float) -> Dictionary:
-	if held == null or not is_instance_valid(held):
-		return {"ok": false}
+func _throw(distance: float) -> Dictionary:
+	# Lob the held object forward so it lands about `distance` metres ahead of where it is held.
+	# 45-degree launch: range = v^2 / g, so v = sqrt(distance * g). It may bounce or roll a little.
+	if busy or held == null or not is_instance_valid(held):
+		return {"ok": false, "in_zone": false}
+	busy = true
+	distance = clampf(distance, THROW_MIN, THROW_MAX)
 	var obj := held
 	var transform_before := obj.global_transform
 	obj.reparent(self, true)
@@ -544,10 +551,38 @@ func _throw(power: float) -> Dictionary:
 	obj.sleeping = false
 	obj.collision_layer = 2
 	obj.collision_mask = 1 | 2
-	obj.apply_central_impulse(_forward() * power + Vector3.UP * power * 0.25)
 	held = null
-	state_name = "Done"
-	return {"ok": true}
+	# `distance` is measured from the robot's front (like the camera guide ticks); the object
+	# is held further ahead than that, so subtract the part it already covers.
+	var target := robot.global_position + _forward() * (ROBOT_RADIUS + distance)
+	var flight := maxf((target - obj.global_position).dot(_forward()), 0.2)
+	var g := float(ProjectSettings.get_setting("physics/3d/default_gravity", 9.8))
+	var v := sqrt(flight * g)
+	obj.linear_velocity = _forward() * v * cos(PI / 4.0) + Vector3.UP * v * sin(PI / 4.0)
+	obj.angular_velocity = Vector3.ZERO
+	# No air drag in flight (objects have linear_damp, which made throws land short);
+	# drag goes back on at landing so the object stops rolling soon.
+	var damp_before := obj.linear_damp
+	obj.linear_damp = 0.0
+	var flight_time := 2.0 * v * sin(PI / 4.0) / g
+	# Wait (in engine time) until it has landed and stopped, so the clip shows the flight.
+	var waited := 0.0
+	while waited < THROW_SETTLE_MAX:
+		await get_tree().physics_frame
+		waited += get_physics_process_delta_time()
+		_capture_frame()
+		if waited >= flight_time:
+			obj.linear_damp = damp_before
+		if waited > flight_time and obj.linear_velocity.length() < 0.05:
+			break
+	obj.linear_damp = damp_before
+	var delta := obj.global_position - DROP_ZONE_CENTER
+	var inside := absf(delta.x) <= 0.5 and absf(delta.z) <= 0.5
+	state_name = "Drop"
+	busy = false
+	if inside:
+		_end_run("pass")
+	return {"ok": true, "in_zone": inside}
 
 func _reset() -> void:
 	# Put everything back where it started, without reloading the scene
@@ -671,6 +706,16 @@ func _serve_peer() -> void:
 				_send_json(200, {"success": false, "in_zone": false})
 			else:
 				var r := await _drop()
+				_send_json(200, {"success": bool(r["ok"]), "in_zone": bool(r["in_zone"])})
+		"POST /throw":
+			if not body.has("distance"):
+				_send_json(400, {"error": "missing distance"})
+			elif state_name == "Done":
+				_send_json(200, {"success": false, "in_zone": false})
+			elif busy:
+				_send_json(409, {"error": "busy"})
+			else:
+				var r := await _throw(float(body["distance"]))
 				_send_json(200, {"success": bool(r["ok"]), "in_zone": bool(r["in_zone"])})
 		"POST /run/start":
 			# The command is only for the clip overlay (added later by tools/make_clip.py); never echoed.

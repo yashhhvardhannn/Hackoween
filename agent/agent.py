@@ -134,7 +134,7 @@ def run_agent(command, mode, reset=False):
             engine_args = {}
             if action == "turn":
                 engine_args["degrees"] = arguments["degrees"]
-            elif action == "move":
+            elif action in ("move", "throw"):
                 engine_args["distance"] = arguments["distance"]
             elif action not in ("pickup", "drop"):
                 raise ValueError(f"Unknown action: {action}")
@@ -179,7 +179,7 @@ def run_agent(command, mode, reset=False):
                 print("Engine ended the run.")
                 break
 
-            if action == "drop" and result.get("success") and result.get("in_zone"):
+            if action in ("drop", "throw") and result.get("success") and result.get("in_zone"):
                 print("\nDelivery confirmed!")
                 outcome = "pass"
                 break

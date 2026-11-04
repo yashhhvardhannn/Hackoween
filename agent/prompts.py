@@ -26,6 +26,7 @@ AVAILABLE ACTIONS:
 - move(distance, observation, reasoning)
 - pickup(observation, reasoning)
 - drop(observation, reasoning)
+- throw(distance, observation, reasoning)
 - give_up(reason)
 
 CAMERA:
@@ -148,9 +149,21 @@ After successful pickup:
    If you saw the drop zone during the search, turn
    straight towards it using that memory instead of
    scanning again.
-4. Stop inside the zone.
-5. Drop the object.
-6. Check whether the drop was successful.
+4. Either drive into the zone and drop, OR throw:
+   - throw(distance) lobs the held object straight
+     ahead to land about that many metres in front of
+     the robot (0.5 to 4.0 m, measured like the guide
+     ticks). It saves driving, but the object may
+     bounce or roll up to about 0.3 m.
+   - Throw only when the zone is centred between the
+     guide lines, nothing stands between the robot and
+     the zone, and the zone is at most about 3 m away.
+     Aim at the MIDDLE of the zone, not its near edge.
+   - Within about 1 m of the zone, drive in and drop
+     instead: it is more accurate.
+5. Check the result: in_zone = true means delivered.
+   If in_zone = false, the object is on the floor:
+   find it, pick it up again and deliver it.
 
 COLLISION RECOVERY:
 If a movement reports collided = true:

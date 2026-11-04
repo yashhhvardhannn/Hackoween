@@ -74,6 +74,21 @@ ROBOT_TOOLS = [
         }
     },
     {
+        "name": "throw",
+        "description": "Throw the held object straight ahead so it lands about this many metres in front of the robot. Allowed range 0.5 to 4.0. It may bounce or roll a little after landing.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "distance": {"type": "number"},
+                "observation": {"type": "string"},
+                "reasoning": {"type": "string"}
+            },
+            "required": [
+                "distance", "observation", "reasoning"
+            ]
+        }
+    },
+    {
         "name": "give_up",
         "description": "Stop when the task cannot be completed.",
         "input_schema": {
