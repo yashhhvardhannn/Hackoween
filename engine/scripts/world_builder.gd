@@ -5,7 +5,9 @@ extends Node3D
 const PORT := 8080
 const SPEED := 1.0
 const TURN_SPEED := 90.0
-const PICKUP_REACH := 0.5
+const PICKUP_REACH := 0.5      # brief: reach 0.5 m, measured from the robot's FRONT
+const ROBOT_RADIUS := 0.28     # matches the body capsule; the front is this far from the centre
+const CAMERA_FORWARD := 0.28   # brief: camera at the robot front, 0.5 m above the floor
 const PICKUP_HALF_ANGLE := 30.0
 const MAX_DEPTH := 10.0
 const BACK_OFF := 0.1          # brief: on collision, back off 0.1 m
@@ -239,7 +241,7 @@ func _build_robot() -> void:
 
 	pickup_point = Marker3D.new()
 	pickup_point.name = "PickupPoint"
-	pickup_point.position = Vector3(0.48, 0.55, 0)
+	pickup_point.position = Vector3(0.62, 0.25, 0)
 	robot.add_child(pickup_point)
 
 	pickup_area = Area3D.new()
@@ -248,7 +250,7 @@ func _build_robot() -> void:
 	pickup_area.collision_layer = 0
 	pickup_area.collision_mask = 2
 	var ps := SphereShape3D.new()
-	ps.radius = PICKUP_REACH
+	ps.radius = PICKUP_REACH + 0.1  # covers everything up to ~0.85 m ahead of the centre
 	var pcs := CollisionShape3D.new()
 	pcs.shape = ps
 	pickup_area.add_child(pcs)
@@ -310,7 +312,7 @@ func _update_cameras() -> void:
 	if robot == null:
 		return
 	var fwd := _forward()
-	look_cam.global_position = robot.global_position + Vector3.UP * 0.5
+	look_cam.global_position = robot.global_position + fwd * CAMERA_FORWARD + Vector3.UP * 0.5
 	look_cam.look_at(look_cam.global_position + fwd + Vector3.DOWN * 0.18, Vector3.UP)
 	pov_cam.global_transform = look_cam.global_transform
 	# Close, downward-angled view of the pickup point. Keep the camera just
@@ -481,7 +483,7 @@ func _pickup() -> Dictionary:
 		var offset: Vector3 = body.global_position - robot.global_position
 		var flat := Vector3(offset.x, 0, offset.z)
 		var d := flat.length()
-		if d > PICKUP_REACH:
+		if d - ROBOT_RADIUS > PICKUP_REACH:  # gap from robot front to object centre
 			continue
 		if d > 0.001 and rad_to_deg(acos(clampf(fwd.dot(flat.normalized()), -1.0, 1.0))) > PICKUP_HALF_ANGLE:
 			continue
