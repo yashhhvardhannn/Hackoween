@@ -68,9 +68,10 @@ Base URL `http://localhost:8080`. Units: metres and degrees. Heading 0 = +x, pos
 Hackoween/
 ├── engine/                  # Godot project
 │   ├── scenes/world.tscn    # YASH owns: room, objects, drop zone, robot, cameras
-│   ├── scripts/robot.gd     # YASH owns: motion, collision, pickup attach, frame capture
-│   ├── scripts/api_server.gd    # YOU own: TCPServer HTTP on :8080, routing, JSON
-│   └── scripts/state_machine.gd # YOU own: states, Blocked/retry logic, outcomes
+│   ├── scripts/robot/robot.gd       # YASH owns: motion, collision, pickup attach, frame capture
+│   ├── scripts/api/api_server.gd    # YOU own: TCPServer HTTP on :8080, routing, JSON
+│   ├── scripts/api/state_machine.gd # YOU own: states, Blocked/retry logic, outcomes
+│   └── scripts/api/fake_robot.gd    # YOU own: stand-in robot until Yash's is ready
 ├── mock_engine/server.py    # YOU: FastAPI fake engine serving canned JPEGs (H0–H4)
 ├── agent/
 │   ├── agent.py             # AADYA: CLI entry `python agent.py "Bring the red cube"`
@@ -88,7 +89,117 @@ Hackoween/
 └── .env.example             # ANTHROPIC_API_KEY=… (real .env is gitignored, NEVER commit)
 ```
 
-**Git rules:** one branch per person (`engine`, `api`, `agent`, `tools`). You merge to `main` at every sync point. Godot `.tscn` files merge badly, so **only Yash edits `world.tscn`**. Your scripts attach to it through an autoload, so you never both touch the scene file.
+---
+
+## 3a. How each laptop works on the repo (no clashes)
+
+**The core rule: every file has exactly one owner, and only that owner edits it.** Two people never edit the same file, so merges never conflict. If you need a change in someone else's file, tell them at stand-up or in the group chat, and they make it.
+
+### Who owns what
+
+| Person · Laptop | Branch | Only this person edits |
+|---|---|---|
+| **Yash** · Vivobook | `engine` | `engine/scenes/**`, `engine/scripts/robot/**`, `engine/project.godot`, `engine/assets/**` |
+| **You** · Galaxy Book | `api` | `engine/scripts/api/**` (`api_server.gd`, `state_machine.gd`), `mock_engine/**`, `README.md`, `.gitignore`, `.gitattributes`, `plan.md` |
+| **Aadya** · Dell | `agent` | `agent/**` (including `agent/requirements.txt`) |
+| **Abhinav** · ThinkPad | `tools` | `tools/**`, `docs/**` |
+| **You** (at sync points and for hidden runs only) | `main` | `runs/final/**`. You are the only person who merges into `main`. |
+
+So the layout in §3 becomes: `engine/scripts/robot/robot.gd` (Yash) and `engine/scripts/api/api_server.gd` and `state_machine.gd` (you). Each Python folder has its **own `requirements.txt`**, so nobody fights over a shared one.
+
+**The two places Godot work meets:**
+1. **`project.godot`:** only Yash edits it. At H0:30 he registers your two scripts as autoloads (`ApiServer` → `res://scripts/api/api_server.gd`, `StateMachine` → `res://scripts/api/state_machine.gd`). You push empty placeholder versions at H0:15 so those paths exist.
+2. **The code interface between your scripts and the robot.** Agree on it at H0:30 and don't change it without both of you. Your `api_server.gd` only calls these functions on the robot node (group `"robot"`):
+   ```gdscript
+   func do_move(distance: float) -> Dictionary   # await-able; {"moved", "collided"}
+   func do_turn(degrees: float) -> Dictionary    # {"turned"}
+   func do_pickup() -> bool
+   func do_drop() -> Dictionary                  # {"success", "in_zone"}
+   func get_pose() -> Dictionary                 # {"x", "y", "heading", "holding"}
+   func get_look_jpeg() -> PackedByteArray       # 640×480 camera frame
+   func get_depth() -> Variant                   # float or null
+   func start_capture(run_id: String, command: String) -> void
+   func stop_capture() -> void
+   ```
+   Until Yash's real robot exists, you write a 20-line `fake_robot.gd` in **your** folder that returns dummy values, so you never wait on him.
+
+### One-time setup (every laptop, at H0)
+
+**Clone outside OneDrive.** OneDrive syncing locks files and corrupts Godot's `.godot/` cache and git's index. Use `C:\dev`:
+```bash
+mkdir -p /c/dev && cd /c/dev && git clone https://github.com/yashhhvardhannn/Hackoween.git && cd Hackoween
+```
+```bash
+git config user.name "Your Name" && git config user.email "you@example.com" && git config core.autocrlf false && git config pull.rebase true
+```
+```bash
+git switch -c engine   # Yash: engine · You: api · Aadya: agent · Abhinav: tools
+```
+```bash
+git push -u origin HEAD
+```
+
+**You commit these at H0:15, before anyone else pushes anything:**
+- `.gitattributes`: stops Windows line-ending (CRLF) noise from making every file look changed.
+  ```
+  * text=auto eol=lf
+  *.png binary
+  *.jpg binary
+  *.mp4 binary
+  ```
+- `.gitignore`:
+  ```
+  .env
+  __pycache__/
+  .venv/
+  engine/.godot/
+  runs/*
+  !runs/final/
+  *.mp4
+  ```
+  Godot 4 note: **do** commit the `*.import` and `*.uid` files. Only `engine/.godot/` is ignored.
+- `.env.example` with `ANTHROPIC_API_KEY=` left empty. Each person creates their own `.env` locally, and it never gets committed.
+
+### Every working session (everyone)
+
+```bash
+git pull origin main          # start of every work block: pick up everyone else's merged work
+```
+```bash
+git add agent/ && git commit -m "agent: add depth to step context"   # stage ONLY your own folder, never `git add .`
+```
+```bash
+git push                      # push your branch at least every hour, so nothing is lost if a laptop dies
+```
+- **Prefix commit messages with your area** (`engine:`, `api:`, `agent:`, `tools:`), so the log reads clearly to judges.
+- **Never** run `git push --force` on `main`, and never commit `.env`.
+- If `git status` shows a file you don't own as changed, you edited it by accident. Undo it with `git restore <file>`.
+
+### Getting work into `main` (you merge, at every even-hour sync)
+
+1. Each person pushes their branch and opens a PR into `main` (`gh pr create --fill`, or on the website). Keep PRs small; one per sync is fine.
+2. You check that the PR touches only that person's folders, then merge it. Because no two people share files, conflicts should not happen. If one does, the file's owner resolves it.
+3. Straight after merging, post in the group chat "main updated". Everyone runs `git pull origin main` before their next change.
+4. **From H4, integration runs on Yash's Vivobook from `main`.** Nobody tests integration on a personal branch.
+
+### What each laptop actually runs
+
+| Laptop | Runs day to day | Test before pushing |
+|---|---|---|
+| **Vivobook (Yash)** | Godot editor with the full scene. **The integration and demo box: after H4 it always tracks `main`.** | Scene opens without errors; robot moves when called through the API |
+| **Galaxy Book (you)** | Godot with your API scripts plus `fake_robot.gd`; `mock_engine/` for Aadya | Every endpoint in §2 answers curl correctly |
+| **Dell (Aadya)** | `agent/` against the mock (H0–H6), then against the Vivobook's engine over Wi-Fi or by running `main` locally. **Hot spare:** pull `main` at every sync so it can take over the demo at any time. | One Haiku run end-to-end; `leak_check.py` passes |
+| **ThinkPad (Abhinav)** | Python + ffmpeg only: `tools/` against saved run folders that others share with him | `make_clip.py` and `leak_check.py` pass on a real run folder |
+
+**Sharing run outputs without committing them:** `runs/` is gitignored, because frames add up to hundreds of MB. To send Abhinav a run, zip the `runs/<run_id>/` folder and share it in the group chat or a shared drive. Only the three hidden-command runs (plus a few good evidence runs) go into `runs/final/` on `main`, and you commit them.
+
+**Agent talking to another laptop's engine:** for the agent to reach the Vivobook's engine over the network, Yash binds the server to `0.0.0.0:8080` and the agent reads `ENGINE_URL` from `.env` (default `http://localhost:8080`). During the official demo and hidden runs, **engine and agent run on the same laptop (the Vivobook) on localhost**, so venue Wi-Fi can't break the run.
+
+### Freeze points
+
+- **H14, sign-off:** you tag the signed-off commit `git tag signoff && git push origin signoff`. After this, a PR into `main` that touches the core path needs a passing 3-command regression on the Vivobook first.
+- **H17:** you tag `hidden-run`. The Vivobook checks out that tag (`git checkout hidden-run`) for the three hidden commands, and nothing gets merged until all three clips are uploaded.
+- **3:00 PM:** code freeze. You tag `v1-final`.
 
 ---
 
