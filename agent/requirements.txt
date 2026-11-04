@@ -1,0 +1,7 @@
+# Python packages for the robot agent (agent/) and the leak checker (tools/).
+# Install from the repo root:  pip install -r agent/requirements.txt
+anthropic>=2.4
+requests>=2.31
+python-dotenv>=1.0
+pillow>=10.0
+numpy>=1.26

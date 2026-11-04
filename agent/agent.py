@@ -48,7 +48,7 @@ def dummy_decision(step):
     }
 
 
-def run_agent(command, mode, reset=False):
+def run_agent(command, mode, reset=False, final=False):
     run_id = datetime.now().strftime(
         "%Y%m%d_%H%M%S"
     )
@@ -62,6 +62,15 @@ def run_agent(command, mode, reset=False):
     print("Mode:", mode)
     print("Command:", command)
     print("Run ID:", run_id)
+
+    if mode == "claude":
+        # $40 team budget: practice runs stop at $30 so money is left for the judged runs.
+        # Judged runs (--final) always go ahead and are recorded separately.
+        model_type = "haiku" if "haiku" in MODEL.lower() else "sonnet"
+        if not budget.can_start_run(model_type, development=not final):
+            budget.show_summary()
+            print("Run NOT started: practice budget used up. Use --final for judged runs.")
+            return
 
     if reset:
         reset_scene()
@@ -199,7 +208,7 @@ def run_agent(command, mode, reset=False):
             # (no pause between steps: the engine replies only after the motion ends)
 
         if mode == "claude":
-            budget.record_run(run_id, run_cost)
+            budget.record_run(run_id, run_cost, development=not final)
             budget.show_summary()
         print("\nRUN COMPLETED")
         print("Logs saved in:", logger.run_folder)
@@ -223,6 +232,12 @@ def main():
     )
 
     parser.add_argument(
+        "--final",
+        action="store_true",
+        help="judged run: always allowed by the budget guard, not counted as practice",
+    )
+
+    parser.add_argument(
         "--reset",
         action="store_true",
         help="put the robot and objects back at their start positions first",
@@ -230,7 +245,7 @@ def main():
 
     args = parser.parse_args()
 
-    run_agent(args.command, args.mode, reset=args.reset)
+    run_agent(args.command, args.mode, reset=args.reset, final=args.final)
 
 
 if __name__ == "__main__":
