@@ -59,40 +59,36 @@ More detail: [docs/how_claude_finds_objects.md](docs/how_claude_finds_objects.md
 ## Architecture
 
 ```mermaid
-flowchart LR
-    U(["👤 User<br/>&quot;Bring the yellow cone&quot;"])
+flowchart TB
+    U(["👤 User types a command<br/>&quot;Bring the yellow cone&quot;"])
 
     subgraph AGENT["agent/ — Python"]
-        direction TB
         A["agent.py<br/>run loop + CLI"]
         P["path_overlay.py<br/>guide lines on frame"]
         L["tools/leak_check.py<br/>blocks object data"]
         B["Brain<br/>claude · openrouter · vision · mock · dummy"]
         T["tools.py<br/>HTTP calls to engine"]
-        G["logger.py + budget.py<br/>JSONL log · $ guard"]
         A --> P --> L --> B
         B -- "one tool call<br/>+ observation & reasoning" --> T
-        A --> G
     end
 
     C[("☁️ Claude API<br/>claude-sonnet-5-5")]
 
     subgraph ENGINE["engine/ — Godot 4"]
-        direction TB
-        W["world_builder.gd<br/>arena · objects · drop zone"]
-        R["Robot<br/>physics · camera · gripper"]
         H["HTTP API :8080<br/>/look /depth /state<br/>/move /turn /pickup /drop /throw"]
-        W --- R --- H
+        R["Robot<br/>physics · camera · gripper"]
+        W["world_builder.gd<br/>arena · objects · drop zone"]
+        H --- R --- W
     end
 
     M["mock_engine/<br/>FastAPI stand-in :8080"]
-    RUNS[("runs/&lt;run_id&gt;/<br/>steps.jsonl · frames · pov")]
+    RUNS[("runs/&lt;run_id&gt;/<br/>steps.jsonl · frames · pov<br/>logger.py + budget.py")]
 
     U --> A
     B <--> C
     T <-- "JSON + JPEG<br/>(no object data)" --> H
     T -. "dev / tests" .-> M
-    G --> RUNS
+    A --> RUNS
     H -- "720p clip frames" --> RUNS
 ```
 
