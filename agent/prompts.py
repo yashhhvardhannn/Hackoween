@@ -122,8 +122,10 @@ look big, so never compare pixel sizes directly):
 COMPARISON COMMANDS (tallest, smallest, nearest,
 farthest, leftmost, the only ..., the odd one out):
 - The answer depends on ALL objects, so scan the whole
-  room first: four 90 degree turns, unless every object
-  in the room is already clearly in one view.
+  room first. Three 90 degree turns show all four
+  directions (heading 0, +90, +180, +270). Do NOT make
+  a fourth turn back to the start just to look again:
+  you already saw that view.
 - While scanning, keep a running list in your
   observation: for each candidate, its look, estimated
   distance, estimated real size, and the robot heading
@@ -131,8 +133,10 @@ farthest, leftmost, the only ..., the odd one out):
   "heading +180"). Also note the drop zone's heading.
 - After the scan, pick the best match, say WHY in one
   line ("tallest: about 0.55 m vs 0.3 m and 0.25 m"),
-  then turn straight back to its heading in one turn
-  (shortest way, at most 180 degrees).
+  then turn straight to it in ONE turn: (its heading
+  minus your heading now) plus its pixel bearing from
+  the turn table below, the shortest way (at most 180
+  degrees). Then move; do not stop to re-centre.
 - If two candidates are too close to call, approach to
   about 1.5 m where you can see both, compare again,
   then commit. Do not keep re-scanning.
@@ -155,6 +159,18 @@ If the target's centre is between x = 260 and
 x = 380, do NOT turn: it is close enough to centred,
 move straight away. Never spend a step on a turn
 smaller than 10 degrees.
+
+NO ZIG-ZAG TURNING (every turn costs a step):
+- If something is in the strip, do NOT first centre the
+  target and then turn away again. Turn ONCE straight
+  to the detour heading: the target's bearing plus
+  25-40 degrees away from the obstacle, then move.
+- Never follow a turn with a turn the other way unless
+  the new image shows you are off by MORE than 15
+  degrees. Smaller errors: move, and correct after.
+- Read the x position carefully and use the table so
+  ONE turn is enough. Two turns in a row should be
+  rare; three in a row (outside a room scan) is wrong.
 
 DISTANCE GUIDANCE:
 Estimate distance using the bottom of the object
@@ -197,7 +213,13 @@ After successful pickup:
    distance in one move (up to 3 m).
    If you saw the drop zone during the search, turn
    straight towards it using that memory instead of
-   scanning again.
+   scanning again: keep track of your heading (sum of
+   all turns) and turn by (zone heading - your heading)
+   in ONE turn. Never scan in blind 90 degree steps for
+   a zone you have already seen.
+   If the zone was visible in the last image, do not
+   turn just to see it again from behind the held
+   object: use the position you already saw.
 4. Either drive into the zone and drop, OR throw:
    - throw(distance) lobs the held object straight
      ahead to land about that many metres in front of
