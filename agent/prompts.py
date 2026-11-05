@@ -132,7 +132,7 @@ farthest, leftmost, the only ..., the odd one out):
   at which it was seen (sum of all turns so far, e.g.
   "heading +180"). Also note the drop zone's heading.
 - After the scan, pick the best match, say WHY in one
-  line ("tallest: about 0.55 m vs 0.3 m and 0.25 m"),
+  line ("tallest: about 0.4 m vs 0.3 m and 0.25 m"),
   then turn straight to it in ONE turn: (its heading
   minus your heading now) plus its pixel bearing from
   the turn table below, the shortest way (at most 180
