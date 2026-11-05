@@ -5,6 +5,9 @@ extends Node3D
 const PORT := 8080
 const SPEED := 1.0
 const TURN_SPEED := 90.0
+# Cylinder is the tallest object, but kept below the camera (0.5 m) so it does not
+# hide the middle of the view when carried.
+const CYLINDER_HEIGHT := 0.4
 const PICKUP_REACH := 0.5      # brief: reach 0.5 m, measured from the robot's FRONT
 const ROBOT_RADIUS := 0.28     # matches the body capsule; the front is this far from the centre
 const CAMERA_FORWARD := 0.28   # brief: camera at the robot front, 0.5 m above the floor
@@ -330,7 +333,7 @@ func _build_world() -> void:
 	_make_object("CubeA", "cube", Color(0.86, 0.09, 0.08), Vector3(1.5, 0.16, -1.2))
 	_make_object("SphereB", "sphere", Color(0.86, 0.09, 0.08), Vector3(0.5, 0.16, 1.8))
 	_make_object("CubeC", "cube", Color(0.08, 0.2, 0.86), Vector3(2.5, 0.16, 1.0))
-	_make_object("CylinderD", "cylinder", Color(0.1, 0.62, 0.22), Vector3(0, 0.3, -2.5))
+	_make_object("CylinderD", "cylinder", Color(0.1, 0.62, 0.22), Vector3(0, CYLINDER_HEIGHT / 2.0 + 0.01, -2.5))
 	_make_object("ConeE", "cone", Color(0.97, 0.78, 0.06), Vector3(-0.5, 0.16, 0.2))
 	_make_drop_zone()
 
@@ -397,12 +400,12 @@ func _make_object(n: String, kind: String, color: Color, pos: Vector3) -> void:
 			var cylinder_mesh := CylinderMesh.new()
 			cylinder_mesh.top_radius = 0.15
 			cylinder_mesh.bottom_radius = 0.15
-			cylinder_mesh.height = 0.6
+			cylinder_mesh.height = CYLINDER_HEIGHT
 			cylinder_mesh.radial_segments = 48
 			mesh.mesh = cylinder_mesh
 			var cylinder_shape := CylinderShape3D.new()
 			cylinder_shape.radius = 0.15
-			cylinder_shape.height = 0.6
+			cylinder_shape.height = CYLINDER_HEIGHT
 			cs.shape = cylinder_shape
 		"cone":
 			var cone_mesh := CylinderMesh.new()
@@ -421,7 +424,7 @@ func _make_object(n: String, kind: String, color: Color, pos: Vector3) -> void:
 	if kind == "cylinder":
 		# Rolled rims top and bottom, like a real tin.
 		var rim_mat := _object_mat(color.darkened(0.3), kind)
-		for y: float in [-0.27, 0.27]:
+		for y: float in [-(CYLINDER_HEIGHT / 2.0 - 0.03), CYLINDER_HEIGHT / 2.0 - 0.03]:
 			var rim := MeshInstance3D.new()
 			var rim_mesh := CylinderMesh.new()
 			rim_mesh.top_radius = 0.156
