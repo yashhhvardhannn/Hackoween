@@ -1,0 +1,150 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: "Helvetica Neue", Arial, sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  color: #f9e2ce;
+  background: #c91f17;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  min-width: 320px;
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  overflow: hidden;
+}
+
+.pixie-stage {
+  position: relative;
+  isolation: isolate;
+  width: 100%;
+  height: 100svh;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 50% 42%, rgb(246 83 50 / 0.6), transparent 37%),
+    linear-gradient(145deg, #ef3927 0%, #cf2118 52%, #9d100e 100%);
+}
+
+.pixie-wordmark {
+  position: absolute;
+  z-index: 10;
+  top: 46%;
+  left: 50%;
+  width: max-content;
+  margin: 0;
+  color: #ffe8d2;
+  font-family: Didot, "Bodoni MT", "Bodoni 72", Georgia, "Times New Roman", serif;
+  font-size: clamp(9rem, 27vw, 31rem);
+  font-style: italic;
+  font-weight: 500;
+  line-height: 0.72;
+  letter-spacing: -0.085em;
+  text-shadow: 0 0 60px rgb(255 226 202 / 0.16);
+  transform: translate(-51%, -50%) scaleX(0.94);
+  white-space: nowrap;
+  user-select: none;
+}
+
+.robot-wrap {
+  position: absolute;
+  z-index: 20;
+  bottom: -7vh;
+  left: 50%;
+  height: 103vh;
+  transform: translateX(-50%);
+  filter: drop-shadow(0 35px 28px rgb(59 4 1 / 0.35));
+  animation: robot-arrive 1.1s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.pixie-robot {
+  display: block;
+  width: auto;
+  height: 100%;
+  pointer-events: none;
+  user-select: none;
+  animation: robot-breathe 5s ease-in-out 1.1s infinite;
+  transform-origin: 50% 80%;
+}
+
+.pixie-glow {
+  position: absolute;
+  z-index: 1;
+  width: 42vw;
+  height: 42vw;
+  border-radius: 999px;
+  background: rgb(255 154 91 / 0.16);
+  filter: blur(65px);
+}
+
+.pixie-glow-left {
+  top: -16vw;
+  left: -12vw;
+}
+
+.pixie-glow-right {
+  right: -16vw;
+  bottom: -20vw;
+}
+
+.stage-grain {
+  position: absolute;
+  z-index: 30;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.11;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.35'/%3E%3C/svg%3E");
+  mix-blend-mode: soft-light;
+}
+
+@keyframes robot-arrive {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(7vh) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0) scale(1);
+  }
+}
+
+@keyframes robot-breathe {
+  0%,
+  100% {
+    transform: translateY(0) rotate(0deg);
+  }
+  50% {
+    transform: translateY(-0.7vh) rotate(0.15deg);
+  }
+}
+
+@media (max-width: 640px) {
+  .pixie-wordmark {
+    top: 38%;
+    font-size: clamp(7rem, 36vw, 11rem);
+  }
+
+  .robot-wrap {
+    bottom: -2vh;
+    height: 88vh;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .robot-wrap,
+  .pixie-robot {
+    animation: none;
+  }
+}
