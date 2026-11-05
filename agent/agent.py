@@ -22,6 +22,7 @@ from agent.tools import (
 )
 from agent.logger import RunLogger
 from agent.path_overlay import add_path_guide
+from agent.commands import is_free_throw
 
 
 MAX_STEPS = 60
@@ -62,6 +63,9 @@ def run_agent(command, mode, reset=False, final=False):
     print("Mode:", mode)
     print("Command:", command)
     print("Run ID:", run_id)
+    free_throw = is_free_throw(command)
+    if free_throw:
+        print("Task: free throw (passes when the throw succeeds, wherever it lands)")
 
     if mode == "claude":
         # $40 team budget: practice runs stop at $30 so money is left for the judged runs.
@@ -199,6 +203,11 @@ def run_agent(command, mode, reset=False, final=False):
             if result.get("state") == "Done":
                 outcome = "fail_collision" if result.get("collided") else "fail_not_reached"
                 print("Engine ended the run.")
+                break
+
+            if free_throw and action == "throw" and result.get("success"):
+                print("\nThrow done!")
+                outcome = "pass"
                 break
 
             if action in ("drop", "throw") and result.get("success") and result.get("in_zone"):

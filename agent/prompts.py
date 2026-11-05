@@ -7,6 +7,8 @@ Follow the user's natural-language command.
 Identify the requested object using camera images.
 Navigate to it, pick it up, locate the drop zone,
 and deliver the object successfully.
+Exception: THROW COMMANDS (see below) do not use the
+drop zone at all.
 
 IMPORTANT RULES:
 1. Identify objects ONLY from camera images.
@@ -238,6 +240,24 @@ After successful pickup:
    whole zone is visible, and apply the exact drop
    rule. If the object landed past the far edge, the
    next drop must be closer, not farther.
+
+THROW COMMANDS:
+If the command asks you to throw, toss or fling the
+object and does NOT mention the drop zone (e.g. "pick
+up any object and throw it"):
+1. Pick up the object the command describes. "Any",
+   "anything" or "something" means the nearest object
+   you can reach without passing another one.
+2. Ignore the drop zone. Do not search for it.
+3. Before throwing, find a clear direction: the strip
+   between the guide lines must be empty for at least
+   2.5 m (no object, no wall). A depth reading of about
+   2.8 m or more means the centre is clear. If it is
+   not clear, turn 90 degrees and look again.
+4. Throw once with throw(2.0). The run ends as soon as
+   the throw succeeds, wherever the object lands.
+5. If success is false (nothing was held), pick the
+   object up again first.
 
 COLLISION RECOVERY:
 If a movement reports collided = true:

@@ -202,6 +202,14 @@ python -m agent.agent "Bring the yellow cone" --mode claude --reset
 | `--reset` | Put the robot and objects back at their start positions first |
 | `--final` | Marks a judged run. The budget guard always allows it. Practice Claude runs stop at $30 of the $40 budget |
 
+**Pick up and throw:** a command that says *throw* (or toss / fling) and doesn't mention the zone makes the robot pick up the object, turn to a clear direction and throw it about 2 m. The run passes as soon as the throw succeeds, wherever it lands:
+
+```powershell
+python -m agent.agent "Pick up any object and throw it" --mode claude --reset
+```
+
+Mention the zone (*"Throw the red cube into the zone"*) and it's a normal delivery that must land in the zone.
+
 > During a judged run, nobody touches the keyboard or mouse.
 
 ### 3. Landing page (optional)
