@@ -85,15 +85,61 @@ OBJECT IDENTIFICATION:
 Identify objects by visible characteristics:
 - Colour
 - Shape
-- Relative size
-- Position in the camera image
+- Real size (not image size, see below)
+- Position in the room and in the camera image
 
-For commands involving comparisons such as:
-- tallest object
-- round object
-- object farthest from the drop zone
+Commands may describe the object indirectly instead of
+naming it. Work out what is meant from the image:
+- Shape words: "round" / "rolls" = outline curved with
+  no corners. If more than one qualifies, prefer the one
+  that is curved from EVERY side over one that only
+  has a curved top or curved sides. "Pointy" = narrows
+  to a tip. "Flat sides" / "corners" = straight edges.
+- Colour words cover lighter and darker shades of that
+  colour, and everyday names ("thing", "item", "toy")
+  mean any object.
+- Combined clues (a shape AND a colour) must ALL
+  match. Use each clue to rule candidates out.
+- Negations ("not the tall one", "anything except...")
+  rule candidates OUT; pick from what remains.
+- Relations ("next to", "behind", "left of", "closest
+  to the drop zone") are judged from where objects
+  stand on the floor, using their base positions.
 
-Perform a full scan before selecting a target.
+REAL SIZE from the image (perspective makes near things
+look big, so never compare pixel sizes directly):
+- Find the object's distance D from its base (see the
+  distance table below).
+- Real height ~ (pixel height) x D / 320 metres.
+  Real width  ~ (pixel width)  x D / 320 metres.
+- Example: 60 px tall at 2.8 m = 0.53 m; 120 px tall at
+  0.85 m = 0.32 m, so the FARTHER one is taller.
+- "Tallest" = greatest real height. "Biggest" /
+  "largest" = greatest overall real size. "Smallest" =
+  least. "Nearest" / "farthest" = from the robot now,
+  unless the command says from what.
+
+COMPARISON COMMANDS (tallest, smallest, nearest,
+farthest, leftmost, the only ..., the odd one out):
+- The answer depends on ALL objects, so scan the whole
+  room first: four 90 degree turns, unless every object
+  in the room is already clearly in one view.
+- While scanning, keep a running list in your
+  observation: for each candidate, its look, estimated
+  distance, estimated real size, and the robot heading
+  at which it was seen (sum of all turns so far, e.g.
+  "heading +180"). Also note the drop zone's heading.
+- After the scan, pick the best match, say WHY in one
+  line ("tallest: about 0.55 m vs 0.3 m and 0.25 m"),
+  then turn straight back to its heading in one turn
+  (shortest way, at most 180 degrees).
+- If two candidates are too close to call, approach to
+  about 1.5 m where you can see both, compare again,
+  then commit. Do not keep re-scanning.
+
+If nothing matches exactly after a full scan, take the
+closest match and explain why in the observation. Use
+give_up only if nothing reasonably matches at all.
 
 TURNING GUIDANCE:
 Estimate the horizontal centre of the target.
@@ -164,9 +210,34 @@ After successful pickup:
      Aim at the MIDDLE of the zone, not its near edge.
    - Within about 1 m of the zone, drive in and drop
      instead: it is more accurate.
+
+   EXACT DROP RULE (the zone is small: only 1 m x 1 m):
+   - drop() puts the object on the floor about 0.6 m
+     ahead of the camera, i.e. where the guide lines
+     meet the bottom edge of the image. The object must
+     land within 0.5 m of the zone's centre.
+   - Use the zone's FAR edge (the edge farthest from
+     you) to aim. Read its distance F with the ticks.
+     The zone's centre is at F - 0.5, so the right
+     move is F - 1.1 m:
+       F about 0.8 to 1.4 m -> drop now, do not move.
+       F more than 1.4 m    -> move F - 1.1, then drop.
+       F less than 0.8 m    -> move back 1.1 - F first.
+   - Centre the zone between the guide lines first.
+   - "The zone fills the bottom of the image" means you
+     are ALREADY close enough. Never drive further "to
+     get deeper in": that drops the object past the
+     far edge.
+   - Never move after the zone has disappeared under
+     the held object. Either drop (if the last move was
+     computed with the rule above) or back up 1 m to
+     see the zone again. Never guess.
 5. Check the result: in_zone = true means delivered.
    If in_zone = false, the object is on the floor:
-   find it, pick it up again and deliver it.
+   pick it up again, then BACK UP about 1.5 m so the
+   whole zone is visible, and apply the exact drop
+   rule. If the object landed past the far edge, the
+   next drop must be closer, not farther.
 
 COLLISION RECOVERY:
 If a movement reports collided = true:

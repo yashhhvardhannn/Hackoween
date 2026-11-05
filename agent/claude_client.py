@@ -114,6 +114,15 @@ NO_NEW_IMAGE = (
     "No new camera image: the robot has not moved or turned since the last one, "
     "so the view is unchanged. Use the last image and the tool result."
 )
+TOOL_NUDGE = "Reply by calling exactly one robot tool now (move, turn, pickup, drop, throw or give_up)."
+MAX_ATTEMPTS = 3
+MAX_TOKENS = 2000
+
+
+def _keep_blocks(content):
+    # Drop hidden thinking blocks: they are tied to the exact earlier history, which
+    # changes when old camera frames are replaced by text (the API then rejects them).
+    return [b.model_dump() for b in content if b.type not in ("thinking", "redacted_thinking")]
 
 
 class ClaudeRobotClient:
@@ -196,38 +205,49 @@ class ClaudeRobotClient:
         }
         check_request(request, command)
 
-        response = self.client.messages.create(
-            model=MODEL,
-            max_tokens=500,
-            system=[{
-                "type": "text",
-                "text": SYSTEM_PROMPT,
-                "cache_control": {"type": "ephemeral"},
-            }],
-            tools=CACHED_TOOLS,
-            tool_choice={"type": "any"},
-            messages=self.history
-        )
-
-        tool_calls = [
-            block for block in response.content
-            if block.type == "tool_use"
-        ]
+        # Newer models (e.g. claude-sonnet-5-5) refuse a forced tool_choice
+        # ("any"/"tool"), so ask with "auto", one tool at a time, and nudge
+        # again if the reply has no robot action.
+        added = 1
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            response = self.client.messages.create(
+                model=MODEL,
+                max_tokens=MAX_TOKENS,
+                system=[{
+                    "type": "text",
+                    "text": SYSTEM_PROMPT,
+                    "cache_control": {"type": "ephemeral"},
+                }],
+                tools=CACHED_TOOLS,
+                tool_choice={"type": "auto", "disable_parallel_tool_use": True},
+                messages=self.history
+            )
+            tool_calls = [
+                block for block in response.content
+                if block.type == "tool_use"
+            ]
+            if len(tool_calls) == 1 or attempt == MAX_ATTEMPTS:
+                break
+            print(f"  (Claude replied without an action, asking again {attempt}/{MAX_ATTEMPTS - 1})")
+            self.history.append({
+                "role": "assistant",
+                "content": _keep_blocks(response.content)
+                or [{"type": "text", "text": "(no reply)"}],
+            })
+            self.history.append({"role": "user", "content": TOOL_NUDGE})
+            added += 2
 
         if len(tool_calls) != 1:
-            self.history.pop()
+            del self.history[-added:]
             raise RuntimeError(
-                "Expected exactly one robot action"
+                f"Expected exactly one robot action (stop_reason={response.stop_reason})"
             )
 
         action = tool_calls[0]
 
         self.history.append({
             "role": "assistant",
-            "content": [
-                block.model_dump()
-                for block in response.content
-            ]
+            "content": _keep_blocks(response.content)
         })
 
         self.pending_tool_id = action.id
